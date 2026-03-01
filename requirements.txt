@@ -2,24 +2,21 @@
 pydub>=0.25.1
 soundfile>=0.12.1
 numpy>=1.24.0
+pyyaml>=6.0.1
+python-dotenv>=1.0.0
 
 # Text processing
 ebooklib>=0.18
 PyPDF2>=3.0.0
 python-docx>=0.8.11
 nltk>=3.8.1
+spacy>=3.7.0
 
 # TTS backends
-# ElevenLabs (cloud API)
 elevenlabs>=1.0.0
-
-# Coqui TTS (local, voice cloning)
 TTS>=0.22.0
 torch>=2.0.0
 torchaudio>=2.0.0
-
-# Kokoro TTS (lightweight)
-# kokoro>=0.1.0  # Install from source if needed
 
 # HTTP client
 requests>=2.31.0
@@ -30,7 +27,3 @@ tqdm>=4.66.0
 
 # Audio analysis
 librosa>=0.10.0
-
-# Configuration
-pyyaml>=6.0.1
-python-dotenv>=1.0.0

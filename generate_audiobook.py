@@ -11,12 +11,31 @@ from pathlib import Path
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from src import AudiobookGenerator
+from src.generator import AudiobookGenerator
+from src.config import Config
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Generate audiobooks from novels using AI TTS"
+        description="Generate audiobooks from novels using AI TTS",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Basic usage with ElevenLabs
+  python generate_audiobook.py novel.txt --clone-voice sample.mp3
+  
+  # Use local XTTS
+  python generate_audiobook.py novel.txt --backend xtts --clone-voice sample.wav
+  
+  # With config file
+  python generate_audiobook.py novel.txt --config config.yaml
+  
+  # Resume interrupted generation
+  python generate_audiobook.py novel.txt --resume
+  
+  # Generate with character voices
+  python generate_audiobook.py novel.txt --characters --config config.yaml
+        """
     )
     
     parser.add_argument(
@@ -31,9 +50,15 @@ def main():
     )
     
     parser.add_argument(
+        "--config", "-c",
+        help="Configuration file (YAML)",
+        default=None
+    )
+    
+    parser.add_argument(
         "--backend",
         choices=["elevenlabs", "xtts", "kokoro"],
-        default="elevenlabs",
+        default=None,
         help="TTS backend to use"
     )
     
@@ -58,8 +83,33 @@ def main():
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=5000,
+        default=None,
         help="Maximum characters per TTS chunk"
+    )
+    
+    parser.add_argument(
+        "--workers", "-w",
+        type=int,
+        default=4,
+        help="Number of concurrent workers (default: 4)"
+    )
+    
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from previous interrupted run"
+    )
+    
+    parser.add_argument(
+        "--characters",
+        action="store_true",
+        help="Enable character voice attribution"
+    )
+    
+    parser.add_argument(
+        "--no-resume",
+        action="store_true",
+        help="Don't resume, start fresh"
     )
     
     args = parser.parse_args()
@@ -69,17 +119,46 @@ def main():
         print(f"Error: Input file not found: {args.input}")
         sys.exit(1)
     
+    # Load config if provided
+    config = None
+    if args.config:
+        if not Path(args.config).exists():
+            print(f"Error: Config file not found: {args.config}")
+            sys.exit(1)
+        config = Config.from_yaml(args.config)
+        print(f"Loaded configuration from {args.config}")
+    
+    # Determine settings (CLI args override config)
+    backend = args.backend or (config.tts.backend if config else "elevenlabs")
+    api_key = args.api_key or (config.tts.api_key if config else None)
+    chunk_size = args.chunk_size or (config.text.chunk_size if config else 4000)
+    workers = args.workers or (config.tts.max_workers if config else 4)
+    
     # Initialize generator
     try:
         generator = AudiobookGenerator(
-            tts_backend=args.backend,
-            api_key=args.api_key
+            tts_backend=backend,
+            api_key=api_key,
+            max_workers=workers,
+            config=config
         )
     except Exception as e:
         print(f"Error initializing generator: {e}")
         sys.exit(1)
     
-    # Clone voice if requested
+    # Clone voices from config
+    if config and config.voices:
+        for voice_name, voice_data in config.voices.items():
+            if isinstance(voice_data, dict) and 'sample' in voice_data:
+                if Path(voice_data['sample']).exists():
+                    print(f"Cloning voice: {voice_name}")
+                    generator.clone_voice(
+                        voice_name=voice_name,
+                        sample_audio_path=voice_data['sample'],
+                        description=voice_data.get('description')
+                    )
+    
+    # Clone voice from CLI if provided
     if args.clone_voice:
         if not Path(args.clone_voice).exists():
             print(f"Error: Voice sample not found: {args.clone_voice}")
@@ -94,22 +173,41 @@ def main():
     
     # Generate audiobook
     print(f"Generating audiobook from {args.input}...")
+    print(f"Backend: {backend}, Workers: {workers}")
     
     def progress_callback(progress):
         percent = int(progress * 100)
-        print(f"\rProgress: {percent}%", end="", flush=True)
+        bar = "█" * (percent // 5) + "░" * (20 - percent // 5)
+        print(f"\r[{bar}] {percent}%", end="", flush=True)
     
     try:
-        output_path = generator.generate_audiobook(
-            input_path=args.input,
-            output_path=args.output,
-            voice=args.voice,
-            chunk_size=args.chunk_size,
-            progress_callback=progress_callback
-        )
-        print(f"\nAudiobook saved to: {output_path}")
+        if args.characters:
+            # Character voice mode
+            output_path = generator.generate_with_characters(
+                input_path=args.input,
+                narrator_voice=args.voice,
+                output_path=args.output
+            )
+        else:
+            # Standard mode
+            output_path = generator.generate_audiobook(
+                input_path=args.input,
+                output_path=args.output,
+                voice=args.voice,
+                chunk_size=chunk_size,
+                progress_callback=progress_callback,
+                resume=args.resume and not args.no_resume
+            )
+        
+        print(f"\n✅ Audiobook saved to: {output_path}")
+        
+    except KeyboardInterrupt:
+        print("\n\n⚠️  Interrupted. Progress saved. Run with --resume to continue.")
+        sys.exit(1)
     except Exception as e:
-        print(f"\nError generating audiobook: {e}")
+        print(f"\n\n❌ Error generating audiobook: {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 

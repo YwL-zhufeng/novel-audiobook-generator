@@ -1,0 +1,42 @@
+# TTS Backend settings
+tts:
+  backend: elevenlabs  # Options: elevenlabs, xtts, kokoro
+  api_key: ${ELEVENLABS_API_KEY}  # Will be read from environment variable
+  max_workers: 4  # Concurrent TTS generation workers
+
+# Voice configuration
+voices:
+  # Narrator voice
+  narrator:
+    sample: samples/narrator.mp3
+    stability: 0.5
+    similarity_boost: 0.75
+    description: "Main narrator voice"
+  
+  # Character voices
+  hero:
+    sample: samples/hero.mp3
+    stability: 0.6
+    similarity_boost: 0.8
+  
+  heroine:
+    sample: samples/heroine.mp3
+    stability: 0.6
+    similarity_boost: 0.8
+
+# Text processing settings
+text:
+  chunk_size: 4000  # Characters per chunk
+  detect_dialogue: true  # Enable dialogue detection
+  language: auto  # auto, chinese, english
+  dialogue_patterns:
+    - '[「""']([^""'"」]+)[""'"」]'  # Chinese quotes
+    - '["""]([^"""]+)["""]'           # English double quotes
+
+# Output settings
+output:
+  format: mp3
+  bitrate: 192k
+  normalize: true  # Volume normalization
+  split_chapters: false  # Split output by chapters
+  output_dir: output
