@@ -1,0 +1,47 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Output files
+output/
+samples/
+temp/
+
+# Model files
+models/
+*.pt
+*.pth
+*.ckpt
+
+# Audio files
+*.mp3
+*.wav
+*.ogg
+
+# Test files
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS
+.DS_Store
+Thumbs.db
