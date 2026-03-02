@@ -83,7 +83,8 @@ class AudiobookGenerator:
         voice: str = "default",
         chunk_size: int = 5000,
         progress_callback: Optional[Callable] = None,
-        resume: bool = True
+        resume: bool = True,
+        metadata: Optional[Dict[str, Any]] = None
     ) -> str:
         """
         Generate audiobook from novel file with concurrent processing.
@@ -95,6 +96,7 @@ class AudiobookGenerator:
             chunk_size: Maximum characters per chunk
             progress_callback: Optional progress callback
             resume: Whether to resume from previous run
+            metadata: Optional metadata dict (title, artist, album, cover_image, etc.)
             
         Returns:
             Path to generated audiobook file
@@ -164,11 +166,12 @@ class AudiobookGenerator:
                 if progress_callback:
                     progress_callback((i + 1) / len(chunks))
         
-        # Concatenate audio
+        # Concatenate audio with metadata
         logger.info("Concatenating audio segments...")
         self.audio_utils.concatenate_audio_files(
             [s for s in audio_segments if s],
-            str(output_path)
+            str(output_path),
+            metadata=metadata
         )
         
         # Cleanup

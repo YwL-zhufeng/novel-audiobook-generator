@@ -45,6 +45,46 @@
 - Type hints throughout codebase
 - Comprehensive test suite
 
+## v1.2.2 - Audiobook Metadata (ID3 Tags)
+
+### New Features
+
+1. **ID3 Metadata Support**
+   - Add title, artist, album, composer tags to generated MP3
+   - Cover image embedding (JPEG)
+   - Duration metadata (TLEN)
+   - Custom TXXX tags for extended metadata
+   - Chapter information storage
+
+2. **Metadata Editor in Web UI**
+   - Book title input
+   - Author/narrator field
+   - Series/album name
+   - Cover image upload (drag & drop)
+   - All metadata embedded in final audiobook
+
+3. **Metadata Reading**
+   - Read metadata from existing audiobooks
+   - Display in compatible players
+
+### Technical Changes
+
+- Added `mutagen` dependency for ID3 tag handling
+- New `add_metadata()` method in AudioUtils
+- New `read_metadata()` method for reading tags
+- Updated `concatenate_audio_files()` to support metadata
+- Updated `generate_audiobook()` to accept metadata dict
+
+### Next Iteration Ideas
+
+- [x] Web UI with Gradio/Streamlit
+- [x] Real-time preview mode
+- [x] Audiobook metadata (ID3 tags)
+- [ ] Batch processing multiple files
+- [ ] Chapter detection using ML
+- [ ] Voice blending/morphing
+- [ ] Docker containerization
+
 ## v1.2.1 - Real-time Preview
 
 ### New Features

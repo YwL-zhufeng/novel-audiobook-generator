@@ -28,5 +28,8 @@ tqdm>=4.66.0
 # Audio analysis
 librosa>=0.10.0
 
+# Metadata
+mutagen>=1.47.0
+
 # Web UI
 gradio>=4.0.0

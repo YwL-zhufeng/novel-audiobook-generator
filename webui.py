@@ -180,9 +180,13 @@ def generate_audiobook_ui(
     file: str,
     voice: str,
     use_character_voices: bool,
+    title: str,
+    artist: str,
+    album: str,
+    cover_image: str,
     progress=gr.Progress()
 ) -> tuple:
-    """Generate audiobook with progress tracking."""
+    """Generate audiobook with progress tracking and metadata."""
     global session
     
     if not session.generator:
@@ -197,6 +201,18 @@ def generate_audiobook_ui(
         
         output_path = output_dir / f"{Path(file).stem}_audiobook.mp3"
         
+        # Build metadata
+        metadata = {}
+        if title:
+            metadata['title'] = title
+        if artist:
+            metadata['artist'] = artist
+            metadata['composer'] = artist
+        if album:
+            metadata['album'] = album
+        if cover_image:
+            metadata['cover_image'] = cover_image
+        
         # Progress callback
         def progress_callback(p: float):
             progress(p, desc=f"Generating... {int(p*100)}%")
@@ -208,13 +224,17 @@ def generate_audiobook_ui(
                 narrator_voice=voice,
                 output_path=str(output_path)
             )
+            # Add metadata after generation
+            if metadata:
+                session.generator.audio_utils.add_metadata(result_path, metadata)
         else:
-            # Standard mode
+            # Standard mode with metadata
             result_path = session.generator.generate_audiobook(
                 input_path=file,
                 output_path=str(output_path),
                 voice=voice,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                metadata=metadata if metadata else None
             )
         
         return result_path, f"✅ Audiobook generated: {Path(result_path).name}"
@@ -350,8 +370,31 @@ def create_ui() -> gr.Blocks:
                 gr.Markdown("---")
                 
                 with gr.Row():
-                    with gr.Column():
-                        gr.Markdown("### 3. Generate Audiobook")
+                    with gr.Column(scale=1):
+                        gr.Markdown("### 3. Metadata (Optional)")
+                        
+                        title_input = gr.Textbox(
+                            label="Book Title",
+                            placeholder="Enter book title..."
+                        )
+                        
+                        artist_input = gr.Textbox(
+                            label="Author / Narrator",
+                            placeholder="Enter author or narrator name..."
+                        )
+                        
+                        album_input = gr.Textbox(
+                            label="Series / Album",
+                            placeholder="Enter series name (optional)..."
+                        )
+                        
+                        cover_input = gr.Image(
+                            label="Cover Image (Optional)",
+                            type="filepath"
+                        )
+                    
+                    with gr.Column(scale=2):
+                        gr.Markdown("### 4. Generate Audiobook")
                         
                         voice_input = gr.Textbox(
                             label="Voice to Use",
@@ -371,7 +414,8 @@ def create_ui() -> gr.Blocks:
                         
                         generate_btn.click(
                             fn=generate_audiobook_ui,
-                            inputs=[file_input, voice_input, use_characters_checkbox],
+                            inputs=[file_input, voice_input, use_characters_checkbox,
+                                   title_input, artist_input, album_input, cover_input],
                             outputs=[output_audio, generate_status]
                         )
             
@@ -554,7 +598,7 @@ def create_ui() -> gr.Blocks:
         gr.Markdown("---")
         gr.Markdown("""
         <div style="text-align: center; color: #666;">
-            Novel Audiobook Generator v1.2.1 | 
+            Novel Audiobook Generator v1.2.2 | 
             <a href="https://github.com/YwL-zhufeng/novel-audiobook-generator">GitHub</a>
         </div>
         """)
