@@ -258,3 +258,107 @@ class AudiobookGenerator:
         for file_path in files:
             if file_path:
                 Path(file_path).unlink(missing_ok=True)
+    
+    def generate_preview(
+        self,
+        text: str,
+        voice: str = "default",
+        preview_length: int = 200,
+        output_path: Optional[str] = None
+    ) -> str:
+        """
+        Generate a short preview audio from text.
+        
+        Args:
+            text: Source text
+            voice: Voice to use
+            preview_length: Maximum characters for preview
+            output_path: Output file path (optional)
+            
+        Returns:
+            Path to generated preview audio
+        """
+        # Extract preview text (first N chars or first paragraph)
+        preview_text = text[:preview_length].strip()
+        
+        # Try to end at a sentence boundary
+        for end_char in ['.', '!', '?', '。', '！', '？', '\n']:
+            if end_char in preview_text[100:]:  # At least 100 chars
+                idx = preview_text.rfind(end_char, 100)
+                if idx > 0:
+                    preview_text = preview_text[:idx+1]
+                    break
+        
+        if not output_path:
+            output_path = self.temp_dir / f"preview_{voice}.mp3"
+        else:
+            output_path = Path(output_path)
+        
+        # Generate speech
+        self.voice_manager.generate_speech(preview_text, voice, str(output_path))
+        
+        logger.info(f"Preview generated: {output_path} ({len(preview_text)} chars)")
+        return str(output_path)
+    
+    def preview_with_characters(
+        self,
+        text: str,
+        narrator_voice: str = "default",
+        character_voices: Optional[Dict[str, str]] = None,
+        preview_length: int = 500,
+        output_path: Optional[str] = None
+    ) -> tuple:
+        """
+        Generate preview with character voices.
+        
+        Returns:
+            Tuple of (audio_path, preview_info)
+        """
+        # Detect dialogue in preview section
+        segments = self.dialogue_detector.detect_dialogue(text[:preview_length*2])
+        
+        # Build preview segments
+        preview_segments = []
+        current_length = 0
+        
+        for segment in segments:
+            if current_length + len(segment.text) > preview_length:
+                break
+            
+            preview_segments.append(segment)
+            current_length += len(segment.text)
+        
+        if not preview_segments:
+            # Fallback to simple preview
+            return self.generate_preview(text, narrator_voice, preview_length, output_path), "Narration only"
+        
+        # Generate audio for each segment
+        segment_files = []
+        segment_info = []
+        
+        for i, segment in enumerate(preview_segments):
+            if segment.is_dialogue and segment.speaker and character_voices and segment.speaker in character_voices:
+                voice = character_voices[segment.speaker]
+                speaker = segment.speaker
+            else:
+                voice = narrator_voice
+                speaker = "Narrator"
+            
+            audio_path = self.temp_dir / f"preview_seg_{i:03d}.mp3"
+            self.voice_manager.generate_speech(segment.text, voice, str(audio_path))
+            segment_files.append(str(audio_path))
+            segment_info.append(f"{speaker}: {segment.text[:50]}...")
+        
+        # Concatenate
+        if not output_path:
+            output_path = self.temp_dir / "preview_characters.mp3"
+        else:
+            output_path = Path(output_path)
+        
+        self.audio_utils.concatenate_audio_files(segment_files, str(output_path))
+        
+        # Cleanup segment files
+        self._cleanup_temp_files(segment_files)
+        
+        info_text = "\n".join(segment_info)
+        return str(output_path), info_text

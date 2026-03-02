@@ -131,6 +131,51 @@ def clone_voice_ui(
         return f"❌ Error cloning voice: {str(e)}"
 
 
+def generate_preview_ui(
+    preview_text: str,
+    voice: str,
+    preview_length: int,
+    use_character_voices: bool
+) -> tuple:
+    """Generate preview audio."""
+    global session
+    
+    if not session.generator:
+        return None, "❌ Please initialize generator first"
+    
+    if not preview_text:
+        return None, "❌ No preview text available"
+    
+    try:
+        if use_character_voices and session.detected_characters:
+            # Build character voice mapping from cloned voices
+            char_voices = {}
+            for char in session.detected_characters[:5]:  # Top 5 characters
+                if session.cloned_voices:
+                    # Assign cloned voices to characters
+                    voice_list = list(session.cloned_voices.keys())
+                    if voice_list:
+                        char_voices[char] = voice_list[min(len(voice_list)-1, session.detected_characters.index(char))]
+            
+            audio_path, info = session.generator.preview_with_characters(
+                text=preview_text,
+                narrator_voice=voice,
+                character_voices=char_voices if char_voices else None,
+                preview_length=preview_length
+            )
+            return audio_path, f"✅ Preview generated with characters\n\n{info}"
+        else:
+            audio_path = session.generator.generate_preview(
+                text=preview_text,
+                voice=voice,
+                preview_length=preview_length
+            )
+            preview_snippet = preview_text[:200].replace('\n', ' ')
+            return audio_path, f"✅ Preview generated\n\nPreview text:\n{preview_snippet}..."
+    except Exception as e:
+        return None, f"❌ Error: {str(e)}"
+
+
 def generate_audiobook_ui(
     file: str,
     voice: str,
@@ -182,7 +227,7 @@ def handle_file_upload(file: str) -> tuple:
     global session
     
     if not file:
-        return "", [], "No file uploaded"
+        return "", [], "No file uploaded", ""
     
     session.uploaded_file = file
     
@@ -196,7 +241,10 @@ def handle_file_upload(file: str) -> tuple:
     
     status = f"📄 {Path(file).name} uploaded. Detected {len(characters)} characters."
     
-    return preview, characters, status
+    # Extract preview text for preview tab (first 1000 chars)
+    preview_text = extract_text_preview(file, max_chars=1000)
+    
+    return preview, characters, status, preview_text
 
 
 # ===== Gradio UI =====
@@ -290,10 +338,13 @@ def create_ui() -> gr.Blocks:
                         
                         upload_status = gr.Textbox(label="Upload Status", interactive=False)
                         
+                        # Hidden state for preview text
+                        preview_text_state = gr.State("")
+                        
                         file_input.change(
                             fn=handle_file_upload,
                             inputs=file_input,
-                            outputs=[preview_box, character_table, upload_status]
+                            outputs=[preview_box, character_table, upload_status, preview_text_state]
                         )
                 
                 gr.Markdown("---")
@@ -325,7 +376,74 @@ def create_ui() -> gr.Blocks:
                         )
             
             
-            # ===== Tab 2: Voice Cloning =====
+            # ===== Tab 2: Real-time Preview =====
+            with gr.TabItem("👂 Preview"):
+                
+                gr.Markdown("""
+                ### 🎧 Real-time Preview
+                
+                Generate a short preview before processing the entire book. This helps you verify voice quality and character attribution.
+                """)
+                
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Preview Settings")
+                        
+                        preview_voice_input = gr.Textbox(
+                            label="Voice to Use",
+                            value="default",
+                            placeholder="Voice name or 'default'"
+                        )
+                        
+                        preview_length_slider = gr.Slider(
+                            minimum=100, maximum=1000, value=300, step=50,
+                            label="Preview Length (characters)"
+                        )
+                        
+                        preview_use_chars = gr.Checkbox(
+                            label="Use Character Voices",
+                            value=True,
+                            info="Enable if you want to preview character voice attribution"
+                        )
+                        
+                        preview_btn = gr.Button("🔊 Generate Preview", variant="primary")
+                        
+                        preview_status = gr.Textbox(
+                            label="Preview Info",
+                            lines=5,
+                            interactive=False
+                        )
+                    
+                    with gr.Column(scale=2):
+                        gr.Markdown("### Preview Text")
+                        
+                        preview_text_input = gr.Textbox(
+                            label="Edit preview text (or use auto-loaded from file)",
+                            lines=8,
+                            placeholder="Upload a file to auto-load preview text, or paste text here..."
+                        )
+                        
+                        preview_audio = gr.Audio(
+                            label="Preview Audio",
+                            type="filepath",
+                            autoplay=False
+                        )
+                
+                # Link file upload to preview text
+                file_input.change(
+                    fn=lambda x: x,
+                    inputs=preview_text_state,
+                    outputs=preview_text_input
+                )
+                
+                preview_btn.click(
+                    fn=generate_preview_ui,
+                    inputs=[preview_text_input, preview_voice_input, preview_length_slider, preview_use_chars],
+                    outputs=[preview_audio, preview_status]
+                )
+            
+            
+            # ===== Tab 3: Voice Cloning =====
             with gr.TabItem("🎭 Voice Cloning"):
                 
                 gr.Markdown("""
@@ -372,7 +490,7 @@ def create_ui() -> gr.Blocks:
                         refresh_btn.click(fn=refresh_voices, outputs=cloned_voices_list)
             
             
-            # ===== Tab 3: Advanced Settings =====
+            # ===== Tab 4: Advanced Settings =====
             with gr.TabItem("⚙️ Advanced"):
                 
                 with gr.Row():
@@ -429,13 +547,14 @@ def create_ui() -> gr.Blocks:
                 - **Concurrent Workers**: More workers = faster generation, but watch API rate limits
                 - **Voice Cloning**: Use 10-20 seconds of clear, noise-free speech for best results
                 - **Character Voices**: Enable dialogue detection to automatically assign voices to characters
+                - **Preview Mode**: Always use Preview first to verify voice quality before generating the full audiobook
                 """)
         
         
         gr.Markdown("---")
         gr.Markdown("""
         <div style="text-align: center; color: #666;">
-            Novel Audiobook Generator v1.2.0 | 
+            Novel Audiobook Generator v1.2.1 | 
             <a href="https://github.com/YwL-zhufeng/novel-audiobook-generator">GitHub</a>
         </div>
         """)

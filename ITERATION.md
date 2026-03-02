@@ -45,6 +45,29 @@
 - Type hints throughout codebase
 - Comprehensive test suite
 
+## v1.2.1 - Real-time Preview
+
+### New Features
+
+1. **Real-time Preview Mode**
+   - Generate short audio previews before full generation
+   - Adjustable preview length (100-1000 characters)
+   - Support character voice attribution in preview
+   - Preview text editor (auto-load from file or manual input)
+   - Audio player with playback controls
+
+2. **Preview with Characters**
+   - Automatically detect characters in preview section
+   - Assign cloned voices to detected characters
+   - Show segment-by-segment voice attribution info
+
+### Technical Changes
+
+- Added `generate_preview()` method to AudiobookGenerator
+- Added `preview_with_characters()` for multi-voice preview
+- New "👂 Preview" tab in Web UI
+- Smart sentence boundary detection for natural previews
+
 ## v1.2.0 - Web UI Release
 
 ### New Features
@@ -84,7 +107,7 @@ python webui.py
 ### Next Iteration Ideas
 
 - [x] Web UI with Gradio/Streamlit
-- [ ] Real-time preview mode
+- [x] Real-time preview mode
 - [ ] Batch processing multiple files
 - [ ] Audiobook metadata (ID3 tags)
 - [ ] Chapter detection using ML
