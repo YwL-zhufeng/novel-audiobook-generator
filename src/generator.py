@@ -365,3 +365,79 @@ class AudiobookGenerator:
         
         info_text = "\n".join(segment_info)
         return str(output_path), info_text
+    
+    def batch_generate(
+        self,
+        input_files: List[str],
+        voice: str = "default",
+        chunk_size: int = 5000,
+        use_character_voices: bool = False,
+        metadata_list: Optional[List[Dict[str, Any]]] = None,
+        progress_callback: Optional[Callable[[int, int, float], None]] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Batch generate audiobooks from multiple files.
+        
+        Args:
+            input_files: List of input file paths
+            voice: Voice to use
+            chunk_size: Maximum characters per chunk
+            use_character_voices: Whether to use character voice attribution
+            metadata_list: Optional list of metadata dicts (one per file)
+            progress_callback: Callback(current_file_index, total_files, file_progress)
+            
+        Returns:
+            List of result dicts with 'input', 'output', 'status', 'error' keys
+        """
+        results = []
+        total_files = len(input_files)
+        
+        for i, input_path in enumerate(input_files):
+            result = {
+                'input': input_path,
+                'output': None,
+                'status': 'pending',
+                'error': None
+            }
+            
+            try:
+                logger.info(f"Batch processing [{i+1}/{total_files}]: {input_path}")
+                result['status'] = 'processing'
+                
+                # Get metadata for this file
+                metadata = metadata_list[i] if metadata_list and i < len(metadata_list) else None
+                
+                # Create file-specific progress callback
+                def file_progress(p: float):
+                    if progress_callback:
+                        progress_callback(i, total_files, p)
+                
+                if use_character_voices:
+                    output_path = self.generate_with_characters(
+                        input_path=input_path,
+                        narrator_voice=voice
+                    )
+                    # Add metadata after generation
+                    if metadata:
+                        self.audio_utils.add_metadata(output_path, metadata)
+                else:
+                    output_path = self.generate_audiobook(
+                        input_path=input_path,
+                        voice=voice,
+                        chunk_size=chunk_size,
+                        progress_callback=file_progress,
+                        metadata=metadata
+                    )
+                
+                result['output'] = output_path
+                result['status'] = 'completed'
+                logger.info(f"Completed: {output_path}")
+                
+            except Exception as e:
+                result['status'] = 'failed'
+                result['error'] = str(e)
+                logger.error(f"Failed to process {input_path}: {e}")
+            
+            results.append(result)
+        
+        return results

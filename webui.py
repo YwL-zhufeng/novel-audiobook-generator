@@ -242,6 +242,61 @@ def generate_audiobook_ui(
         return None, f"❌ Error: {str(e)}"
 
 
+def batch_generate_ui(
+    files: List[str],
+    voice: str,
+    use_character_voices: bool,
+    progress=gr.Progress()
+) -> tuple:
+    """Batch generate audiobooks from multiple files."""
+    global session
+    
+    if not session.generator:
+        return None, "❌ Please initialize generator first"
+    
+    if not files or len(files) == 0:
+        return None, "❌ Please upload at least one file"
+    
+    try:
+        total_files = len(files)
+        
+        def batch_progress(current: int, total: int, file_progress: float):
+            overall = (current + file_progress) / total
+            progress(overall, desc=f"Processing {current+1}/{total}...")
+        
+        results = session.generator.batch_generate(
+            input_files=files,
+            voice=voice,
+            use_character_voices=use_character_voices,
+            progress_callback=batch_progress
+        )
+        
+        # Build results table
+        output_data = []
+        completed = 0
+        failed = 0
+        
+        for r in results:
+            status_icon = "✅" if r['status'] == 'completed' else "❌"
+            output_name = Path(r['output']).name if r['output'] else "N/A"
+            output_data.append([
+                Path(r['input']).name,
+                status_icon,
+                output_name,
+                r['error'] if r['error'] else ""
+            ])
+            if r['status'] == 'completed':
+                completed += 1
+            else:
+                failed += 1
+        
+        summary = f"Batch complete: {completed} succeeded, {failed} failed"
+        return output_data, summary
+        
+    except Exception as e:
+        return None, f"❌ Batch error: {str(e)}"
+
+
 def handle_file_upload(file: str) -> tuple:
     """Handle file upload and extract preview."""
     global session
@@ -534,7 +589,61 @@ def create_ui() -> gr.Blocks:
                         refresh_btn.click(fn=refresh_voices, outputs=cloned_voices_list)
             
             
-            # ===== Tab 4: Advanced Settings =====
+            # ===== Tab 4: Batch Processing =====
+            with gr.TabItem("📚 Batch"):
+                
+                gr.Markdown("""
+                ### 📚 Batch Processing
+                
+                Process multiple novels at once. Perfect for book series or library conversion.
+                """)
+                
+                with gr.Row():
+                    with gr.Column(scale=1):
+                        gr.Markdown("### Batch Settings")
+                        
+                        batch_voice_input = gr.Textbox(
+                            label="Voice to Use",
+                            value="default",
+                            placeholder="Voice name or 'default'"
+                        )
+                        
+                        batch_use_chars = gr.Checkbox(
+                            label="Use Character Voices",
+                            value=False,
+                            info="Apply character voice attribution to all files"
+                        )
+                        
+                        batch_btn = gr.Button("🚀 Start Batch Processing", variant="primary", size="lg")
+                        
+                        batch_status = gr.Textbox(
+                            label="Batch Status",
+                            interactive=False
+                        )
+                    
+                    with gr.Column(scale=2):
+                        gr.Markdown("### Upload Files")
+                        
+                        batch_files = gr.File(
+                            label="Upload Multiple Novels",
+                            file_types=[".txt", ".epub", ".pdf"],
+                            multiple=True
+                        )
+                        
+                        batch_results = gr.Dataframe(
+                            headers=["File", "Status", "Output", "Error"],
+                            label="Batch Results",
+                            interactive=False
+                        )
+                        
+                        batch_btn.click(
+                            fn=batch_generate_ui,
+                            inputs=[batch_files, batch_voice_input, batch_use_chars],
+                            outputs=[batch_results, batch_status]
+                        )
+            
+            
+            # ===== Tab 5: Advanced Settings =====
             with gr.TabItem("⚙️ Advanced"):
                 
                 with gr.Row():
@@ -598,7 +707,7 @@ def create_ui() -> gr.Blocks:
         gr.Markdown("---")
         gr.Markdown("""
         <div style="text-align: center; color: #666;">
-            Novel Audiobook Generator v1.2.2 | 
+            Novel Audiobook Generator v1.2.3 | 
             <a href="https://github.com/YwL-zhufeng/novel-audiobook-generator">GitHub</a>
         </div>
         """)

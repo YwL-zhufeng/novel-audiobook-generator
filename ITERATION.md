@@ -45,6 +45,45 @@
 - Type hints throughout codebase
 - Comprehensive test suite
 
+## v1.2.3 - Batch Processing
+
+### New Features
+
+1. **Batch Processing**
+   - Process multiple novels in one run
+   - Queue-based processing with progress tracking
+   - Individual file success/failure tracking
+   - Results table with download links
+
+2. **Batch UI in Web Interface**
+   - Multi-file upload (drag & drop multiple files)
+   - Batch settings panel
+   - Real-time progress for entire batch
+   - Results summary (success/failed count)
+
+3. **Batch API**
+   - `batch_generate()` method in AudiobookGenerator
+   - Progress callback with (current, total, file_progress)
+   - Returns detailed results for each file
+   - Continues on individual file failures
+
+### Technical Changes
+
+- New `batch_generate()` method supporting list of input files
+- Batch progress callback with granular progress
+- Error isolation - one file failure doesn't stop batch
+- Results data structure for batch tracking
+
+### Next Iteration Ideas
+
+- [x] Web UI with Gradio/Streamlit
+- [x] Real-time preview mode
+- [x] Audiobook metadata (ID3 tags)
+- [x] Batch processing multiple files
+- [ ] Chapter detection using ML
+- [ ] Voice blending/morphing
+- [ ] Docker containerization
+
 ## v1.2.2 - Audiobook Metadata (ID3 Tags)
 
 ### New Features
