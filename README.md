@@ -12,6 +12,7 @@ AI-powered audiobook generator for novels with voice cloning capabilities.
 - 💾 **Resume Support**: Continue from where you left off
 - 🎵 **Audio Post-processing**: Volume normalization, chapter splitting
 - ⚙️ **YAML Configuration**: Flexible config-based workflow
+- 🌐 **Web UI**: User-friendly Gradio interface
 
 ## Tech Stack
 
@@ -43,6 +44,23 @@ python -m spacy download en_core_web_sm  # For English
 ```
 
 ## Quick Start
+
+### Web UI (推荐 / Recommended)
+
+启动直观的网页界面：
+
+```bash
+python webui.py
+```
+
+然后访问 `http://localhost:7860`
+
+功能：
+- 📤 拖拽上传小说文件
+- 🎙️ 实时声音克隆
+- 🎭 自动角色检测与配音
+- 📊 可视化进度跟踪
+- ⚙️ 高级配置选项
 
 ### Command Line
 
@@ -150,6 +168,7 @@ novel-audiobook-generator/
 │   ├── audio_utils.py        # Audio post-processing
 │   └── config.py             # Configuration management
 ├── generate_audiobook.py     # CLI entry point
+├── webui.py                  # Gradio Web UI
 ├── requirements.txt
 ├── config.example.yaml
 └── README.md

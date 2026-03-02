@@ -27,3 +27,6 @@ tqdm>=4.66.0
 
 # Audio analysis
 librosa>=0.10.0
+
+# Web UI
+gradio>=4.0.0

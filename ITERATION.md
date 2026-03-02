@@ -45,9 +45,45 @@
 - Type hints throughout codebase
 - Comprehensive test suite
 
+## v1.2.0 - Web UI Release
+
+### New Features
+
+1. **Gradio Web UI**
+   - User-friendly web interface at `http://localhost:7860`
+   - Three-tab layout: Quick Start, Voice Cloning, Advanced Settings
+   - Drag-and-drop file upload with preview
+   - Real-time progress tracking with visual progress bar
+   - Audio player for generated results
+
+2. **Voice Cloning Interface**
+   - Upload audio samples directly in browser
+   - Name and describe cloned voices
+   - Voice registry management
+
+3. **Character Detection UI**
+   - Automatic character detection display
+   - Dialogue count statistics
+   - Character-voice assignment table
+
+4. **Advanced Configuration Panel**
+   - Chunk size adjustment
+   - Output format selection (MP3/WAV/M4A)
+   - Bitrate and normalization controls
+   - Language detection settings
+
+### Usage
+
+```bash
+# Launch Web UI
+python webui.py
+
+# Access at http://localhost:7860
+```
+
 ### Next Iteration Ideas
 
-- [ ] Web UI with Gradio/Streamlit
+- [x] Web UI with Gradio/Streamlit
 - [ ] Real-time preview mode
 - [ ] Batch processing multiple files
 - [ ] Audiobook metadata (ID3 tags)
