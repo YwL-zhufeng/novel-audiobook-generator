@@ -1,21 +1,17 @@
 """
-Batch task queue for processing multiple audiobook generation tasks.
+Background task queue for audiobook generation.
 """
 
 import json
-import sqlite3
-import threading
 import uuid
-from typing import List, Optional, Dict, Any, Callable
+import asyncio
+from pathlib import Path
+from typing import Dict, List, Optional, Callable, Any
 from dataclasses import dataclass, asdict
 from datetime import datetime
-from enum import Enum, auto
-from pathlib import Path
-import logging
-from queue import Queue, Empty
+from enum import Enum
 
 from .logging_config import get_logger
-from .exceptions import AudiobookGeneratorError
 
 logger = get_logger(__name__)
 
@@ -23,9 +19,7 @@ logger = get_logger(__name__)
 class TaskStatus(Enum):
     """Task status enumeration."""
     PENDING = "pending"
-    QUEUED = "queued"
     RUNNING = "running"
-    PAUSED = "paused"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -33,592 +27,261 @@ class TaskStatus(Enum):
 
 @dataclass
 class Task:
-    """Represents a batch processing task."""
+    """Represents a generation task."""
     id: str
-    input_path: str
-    output_path: Optional[str]
+    input_file: str
+    output_file: str
     voice: str
-    chunk_size: int
     status: TaskStatus
-    priority: int  # Lower = higher priority
-    created_at: datetime
-    started_at: Optional[datetime] = None
-    completed_at: Optional[datetime] = None
-    progress: float = 0.0
+    created_at: str
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
     error_message: Optional[str] = None
-    metadata: Dict[str, Any] = None
+    progress: float = 0.0
+    metadata: Optional[Dict[str, Any]] = None
     
-    def __post_init__(self):
-        if self.metadata is None:
-            self.metadata = {}
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'id': self.id,
-            'input_path': self.input_path,
-            'output_path': self.output_path,
-            'voice': self.voice,
-            'chunk_size': self.chunk_size,
-            'status': self.status.value,
-            'priority': self.priority,
-            'created_at': self.created_at.isoformat(),
-            'started_at': self.started_at.isoformat() if self.started_at else None,
-            'completed_at': self.completed_at.isoformat() if self.completed_at else None,
-            'progress': self.progress,
-            'error_message': self.error_message,
-            'metadata': self.metadata,
-        }
+    def to_dict(self) -> dict:
+        """Convert to dictionary."""
+        data = asdict(self)
+        data['status'] = self.status.value
+        return data
     
     @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> 'Task':
-        return cls(
-            id=data['id'],
-            input_path=data['input_path'],
-            output_path=data.get('output_path'),
-            voice=data['voice'],
-            chunk_size=data['chunk_size'],
-            status=TaskStatus(data['status']),
-            priority=data['priority'],
-            created_at=datetime.fromisoformat(data['created_at']),
-            started_at=datetime.fromisoformat(data['started_at']) if data.get('started_at') else None,
-            completed_at=datetime.fromisoformat(data['completed_at']) if data.get('completed_at') else None,
-            progress=data.get('progress', 0.0),
-            error_message=data.get('error_message'),
-            metadata=data.get('metadata', {}),
-        )
-
-
-@dataclass
-class QueueStats:
-    """Queue statistics."""
-    total_tasks: int = 0
-    pending: int = 0
-    running: int = 0
-    completed: int = 0
-    failed: int = 0
-    cancelled: int = 0
-    
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            'total_tasks': self.total_tasks,
-            'pending': self.pending,
-            'running': self.running,
-            'completed': self.completed,
-            'failed': self.failed,
-            'cancelled': self.cancelled,
-        }
+    def from_dict(cls, data: dict) -> 'Task':
+        """Create from dictionary."""
+        data['status'] = TaskStatus(data['status'])
+        return cls(**data)
 
 
 class TaskQueue:
-    """
-    Persistent task queue for batch audiobook generation.
+    """Background task queue for audiobook generation."""
     
-    Features:
-    - SQLite-backed persistence
-    - Priority-based scheduling
-    - Progress tracking
-    - Pause/resume support
-    """
-    
-    def __init__(
-        self,
-        db_path: Optional[str] = None,
-        max_concurrent: int = 1,
-        auto_start: bool = False
-    ):
+    def __init__(self, queue_dir: Optional[str] = None, max_workers: int = 2):
         """
         Initialize task queue.
         
         Args:
-            db_path: Path to SQLite database
-            max_concurrent: Maximum concurrent tasks
-            auto_start: Auto-start processing on init
+            queue_dir: Directory for queue persistence
+            max_workers: Maximum concurrent workers
         """
-        if db_path is None:
-            db_path = Path.home() / '.novel-audiobook-generator' / 'task_queue.db'
+        if queue_dir is None:
+            queue_dir = Path.home() / '.novel-audiobook-generator' / 'queue'
+        else:
+            queue_dir = Path(queue_dir)
         
-        self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.queue_dir = queue_dir
+        self.queue_dir.mkdir(parents=True, exist_ok=True)
         
-        self.max_concurrent = max_concurrent
-        self._local = threading.local()
-        self._lock = threading.Lock()
-        self._running = False
-        self._worker_thread: Optional[threading.Thread] = None
-        self._current_tasks: Dict[str, Task] = {}
-        self._progress_callbacks: List[Callable[[str, float], None]] = []
+        self.max_workers = max_workers
+        self.tasks: Dict[str, Task] = {}
+        self.running = False
+        self._callbacks: List[Callable[[Task], None]] = []
         
-        self._init_db()
-        
-        if auto_start:
-            self.start()
+        # Load existing tasks
+        self._load_tasks()
     
-    def _get_connection(self) -> sqlite3.Connection:
-        """Get thread-local database connection."""
-        if not hasattr(self._local, 'connection') or self._local.connection is None:
-            self._local.connection = sqlite3.connect(str(self.db_path))
-            self._local.connection.row_factory = sqlite3.Row
-        return self._local.connection
+    def _load_tasks(self):
+        """Load tasks from disk."""
+        tasks_file = self.queue_dir / 'tasks.json'
+        if tasks_file.exists():
+            try:
+                with open(tasks_file, 'r') as f:
+                    data = json.load(f)
+                for task_data in data.values():
+                    task = Task.from_dict(task_data)
+                    self.tasks[task.id] = task
+                logger.info(f"Loaded {len(self.tasks)} tasks from queue")
+            except Exception as e:
+                logger.error(f"Failed to load tasks: {e}")
     
-    def _init_db(self):
-        """Initialize database schema."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS tasks (
-                id TEXT PRIMARY KEY,
-                input_path TEXT NOT NULL,
-                output_path TEXT,
-                voice TEXT NOT NULL,
-                chunk_size INTEGER NOT NULL,
-                status TEXT NOT NULL,
-                priority INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL,
-                started_at TEXT,
-                completed_at TEXT,
-                progress REAL DEFAULT 0.0,
-                error_message TEXT,
-                metadata TEXT
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_status ON tasks(status)
-        ''')
-        
-        cursor.execute('''
-            CREATE INDEX IF NOT EXISTS idx_priority ON tasks(priority)
-        ''')
-        
-        conn.commit()
-        logger.debug(f"Initialized task queue database at {self.db_path}")
+    def _save_tasks(self):
+        """Save tasks to disk."""
+        tasks_file = self.queue_dir / 'tasks.json'
+        try:
+            data = {task_id: task.to_dict() for task_id, task in self.tasks.items()}
+            with open(tasks_file, 'w') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save tasks: {e}")
     
-    def add_task(
+    def submit(
         self,
-        input_path: str,
-        output_path: Optional[str] = None,
-        voice: str = "default",
-        chunk_size: int = 5000,
-        priority: int = 0,
+        input_file: str,
+        output_file: str,
+        voice: str,
         metadata: Optional[Dict[str, Any]] = None
-    ) -> str:
+    ) -> Task:
         """
-        Add a task to the queue.
+        Submit a new task.
         
         Args:
-            input_path: Input file path
-            output_path: Output file path (optional)
+            input_file: Input novel file
+            output_file: Output audiobook file
             voice: Voice to use
-            chunk_size: Text chunk size
-            priority: Task priority (lower = higher priority)
-            metadata: Additional metadata
+            metadata: Optional metadata
             
         Returns:
-            Task ID
+            Created task
         """
-        task_id = str(uuid.uuid4())[:8]
-        
         task = Task(
-            id=task_id,
-            input_path=input_path,
-            output_path=output_path,
+            id=str(uuid.uuid4()),
+            input_file=input_file,
+            output_file=output_file,
             voice=voice,
-            chunk_size=chunk_size,
             status=TaskStatus.PENDING,
-            priority=priority,
-            created_at=datetime.now(),
-            metadata=metadata or {}
+            created_at=datetime.now().isoformat(),
+            metadata=metadata
         )
         
-        self._save_task(task)
-        logger.info(f"Added task {task_id}: {input_path}")
+        self.tasks[task.id] = task
+        self._save_tasks()
         
-        return task_id
-    
-    def add_tasks_batch(
-        self,
-        input_paths: List[str],
-        output_paths: Optional[List[str]] = None,
-        voice: str = "default",
-        chunk_size: int = 5000,
-        priority: int = 0
-    ) -> List[str]:
-        """
-        Add multiple tasks to the queue.
-        
-        Args:
-            input_paths: List of input file paths
-            output_paths: Optional list of output paths
-            voice: Voice to use
-            chunk_size: Text chunk size
-            priority: Task priority
-            
-        Returns:
-            List of task IDs
-        """
-        if output_paths and len(output_paths) != len(input_paths):
-            raise ValueError("output_paths must have same length as input_paths")
-        
-        task_ids = []
-        for i, input_path in enumerate(input_paths):
-            output_path = output_paths[i] if output_paths else None
-            task_id = self.add_task(
-                input_path=input_path,
-                output_path=output_path,
-                voice=voice,
-                chunk_size=chunk_size,
-                priority=priority
-            )
-            task_ids.append(task_id)
-        
-        return task_ids
-    
-    def _save_task(self, task: Task):
-        """Save task to database."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO tasks
-            (id, input_path, output_path, voice, chunk_size, status, priority,
-             created_at, started_at, completed_at, progress, error_message, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ''', (
-            task.id,
-            task.input_path,
-            task.output_path,
-            task.voice,
-            task.chunk_size,
-            task.status.value,
-            task.priority,
-            task.created_at.isoformat(),
-            task.started_at.isoformat() if task.started_at else None,
-            task.completed_at.isoformat() if task.completed_at else None,
-            task.progress,
-            task.error_message,
-            json.dumps(task.metadata)
-        ))
-        
-        conn.commit()
+        logger.info(f"Task submitted: {task.id}")
+        return task
     
     def get_task(self, task_id: str) -> Optional[Task]:
         """Get task by ID."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT * FROM tasks WHERE id = ?', (task_id,))
-        row = cursor.fetchone()
-        
-        if row is None:
-            return None
-        
-        return self._row_to_task(row)
+        return self.tasks.get(task_id)
     
-    def _row_to_task(self, row: sqlite3.Row) -> Task:
-        """Convert database row to Task."""
-        return Task(
-            id=row['id'],
-            input_path=row['input_path'],
-            output_path=row['output_path'],
-            voice=row['voice'],
-            chunk_size=row['chunk_size'],
-            status=TaskStatus(row['status']),
-            priority=row['priority'],
-            created_at=datetime.fromisoformat(row['created_at']),
-            started_at=datetime.fromisoformat(row['started_at']) if row['started_at'] else None,
-            completed_at=datetime.fromisoformat(row['completed_at']) if row['completed_at'] else None,
-            progress=row['progress'],
-            error_message=row['error_message'],
-            metadata=json.loads(row['metadata']) if row['metadata'] else {}
-        )
-    
-    def get_pending_tasks(self, limit: Optional[int] = None) -> List[Task]:
-        """Get pending tasks ordered by priority."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        query = '''
-            SELECT * FROM tasks 
-            WHERE status IN ('pending', 'queued')
-            ORDER BY priority ASC, created_at ASC
-        '''
-        if limit:
-            query += f' LIMIT {limit}'
-        
-        cursor.execute(query)
-        return [self._row_to_task(row) for row in cursor.fetchall()]
-    
-    def get_all_tasks(
+    def list_tasks(
         self,
         status: Optional[TaskStatus] = None,
-        limit: Optional[int] = None
+        limit: int = 100
     ) -> List[Task]:
-        """Get all tasks, optionally filtered by status."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
+        """
+        List tasks.
+        
+        Args:
+            status: Filter by status
+            limit: Maximum number of tasks
+            
+        Returns:
+            List of tasks
+        """
+        tasks = list(self.tasks.values())
         
         if status:
-            query = 'SELECT * FROM tasks WHERE status = ? ORDER BY created_at DESC'
-            params = (status.value,)
-        else:
-            query = 'SELECT * FROM tasks ORDER BY created_at DESC'
-            params = ()
+            tasks = [t for t in tasks if t.status == status]
         
-        if limit:
-            query += f' LIMIT {limit}'
+        # Sort by creation time (newest first)
+        tasks.sort(key=lambda t: t.created_at, reverse=True)
         
-        cursor.execute(query, params)
-        return [self._row_to_task(row) for row in cursor.fetchall()]
-    
-    def update_task_progress(self, task_id: str, progress: float):
-        """Update task progress."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute(
-            'UPDATE tasks SET progress = ? WHERE id = ?',
-            (progress, task_id)
-        )
-        conn.commit()
-        
-        # Notify callbacks
-        for callback in self._progress_callbacks:
-            try:
-                callback(task_id, progress)
-            except Exception as e:
-                logger.error(f"Error in progress callback: {e}")
+        return tasks[:limit]
     
     def cancel_task(self, task_id: str) -> bool:
-        """Cancel a pending or queued task."""
-        task = self.get_task(task_id)
-        if task is None:
-            return False
+        """
+        Cancel a pending task.
         
-        if task.status not in [TaskStatus.PENDING, TaskStatus.QUEUED, TaskStatus.PAUSED]:
-            logger.warning(f"Cannot cancel task {task_id} with status {task.status.value}")
-            return False
-        
-        task.status = TaskStatus.CANCELLED
-        task.completed_at = datetime.now()
-        self._save_task(task)
-        
-        logger.info(f"Cancelled task {task_id}")
-        return True
-    
-    def remove_task(self, task_id: str) -> bool:
-        """Remove a task from the queue."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('DELETE FROM tasks WHERE id = ?', (task_id,))
-        conn.commit()
-        
-        return cursor.rowcount > 0
-    
-    def clear_completed(self, include_failed: bool = False) -> int:
-        """Clear completed tasks from the queue."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        if include_failed:
-            cursor.execute(
-                "DELETE FROM tasks WHERE status IN ('completed', 'failed', 'cancelled')"
-            )
-        else:
-            cursor.execute("DELETE FROM tasks WHERE status = 'completed'")
-        
-        conn.commit()
-        
-        count = cursor.rowcount
-        logger.info(f"Cleared {count} completed tasks")
-        return count
-    
-    def get_stats(self) -> QueueStats:
-        """Get queue statistics."""
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT status, COUNT(*) as count 
-            FROM tasks 
-            GROUP BY status
-        ''')
-        
-        stats = QueueStats()
-        for row in cursor.fetchall():
-            status = row['status']
-            count = row['count']
+        Args:
+            task_id: Task ID to cancel
             
-            if status in ['pending', 'queued']:
-                stats.pending += count
-            elif status == 'running':
-                stats.running = count
-            elif status == 'completed':
-                stats.completed = count
-            elif status == 'failed':
-                stats.failed = count
-            elif status == 'cancelled':
-                stats.cancelled = count
+        Returns:
+            True if cancelled successfully
+        """
+        task = self.tasks.get(task_id)
+        if not task:
+            return False
         
-        stats.total_tasks = sum([
-            stats.pending, stats.running, stats.completed,
-            stats.failed, stats.cancelled
-        ])
+        if task.status == TaskStatus.PENDING:
+            task.status = TaskStatus.CANCELLED
+            task.completed_at = datetime.now().isoformat()
+            self._save_tasks()
+            logger.info(f"Task cancelled: {task_id}")
+            return True
+        
+        return False
+    
+    def delete_task(self, task_id: str) -> bool:
+        """
+        Delete a task.
+        
+        Args:
+            task_id: Task ID to delete
+            
+        Returns:
+            True if deleted successfully
+        """
+        if task_id in self.tasks:
+            del self.tasks[task_id]
+            self._save_tasks()
+            return True
+        return False
+    
+    def on_task_update(self, callback: Callable[[Task], None]):
+        """Register callback for task updates."""
+        self._callbacks.append(callback)
+    
+    def _notify_update(self, task: Task):
+        """Notify all callbacks of task update."""
+        for callback in self._callbacks:
+            try:
+                callback(task)
+            except Exception as e:
+                logger.error(f"Callback error: {e}")
+    
+    def update_progress(self, task_id: str, progress: float):
+        """Update task progress."""
+        task = self.tasks.get(task_id)
+        if task:
+            task.progress = progress
+            self._save_tasks()
+            self._notify_update(task)
+    
+    def mark_completed(self, task_id: str):
+        """Mark task as completed."""
+        task = self.tasks.get(task_id)
+        if task:
+            task.status = TaskStatus.COMPLETED
+            task.progress = 1.0
+            task.completed_at = datetime.now().isoformat()
+            self._save_tasks()
+            self._notify_update(task)
+    
+    def mark_failed(self, task_id: str, error: str):
+        """Mark task as failed."""
+        task = self.tasks.get(task_id)
+        if task:
+            task.status = TaskStatus.FAILED
+            task.error_message = error
+            task.completed_at = datetime.now().isoformat()
+            self._save_tasks()
+            self._notify_update(task)
+    
+    def get_stats(self) -> Dict[str, int]:
+        """Get queue statistics."""
+        stats = {
+            'total': len(self.tasks),
+            'pending': 0,
+            'running': 0,
+            'completed': 0,
+            'failed': 0,
+            'cancelled': 0
+        }
+        
+        for task in self.tasks.values():
+            stats[task.status.value] += 1
         
         return stats
     
-    def start(self):
-        """Start processing tasks."""
-        if self._running:
-            return
+    def cleanup_old_tasks(self, days: int = 7):
+        """Clean up completed tasks older than specified days."""
+        from datetime import timedelta
         
-        self._running = True
-        self._worker_thread = threading.Thread(target=self._process_loop, daemon=True)
-        self._worker_thread.start()
+        cutoff = datetime.now() - timedelta(days=days)
+        to_delete = []
         
-        logger.info("Task queue started")
-    
-    def stop(self, wait: bool = True):
-        """Stop processing tasks."""
-        self._running = False
+        for task_id, task in self.tasks.items():
+            if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+                if task.completed_at:
+                    completed_time = datetime.fromisoformat(task.completed_at)
+                    if completed_time < cutoff:
+                        to_delete.append(task_id)
         
-        if wait and self._worker_thread:
-            self._worker_thread.join(timeout=30.0)
+        for task_id in to_delete:
+            del self.tasks[task_id]
         
-        logger.info("Task queue stopped")
-    
-    def pause(self):
-        """Pause processing (current task will complete)."""
-        self._running = False
-        logger.info("Task queue paused")
-    
-    def _process_loop(self):
-        """Main processing loop."""
-        while self._running:
-            try:
-                # Get next pending task
-                pending = self.get_pending_tasks(limit=1)
-                
-                if not pending:
-                    # No pending tasks, wait a bit
-                    import time
-                    time.sleep(1.0)
-                    continue
-                
-                task = pending[0]
-                
-                # Mark as running
-                task.status = TaskStatus.RUNNING
-                task.started_at = datetime.now()
-                self._save_task(task)
-                
-                with self._lock:
-                    self._current_tasks[task.id] = task
-                
-                # Process task (this should be overridden by subclass)
-                try:
-                    self._process_task(task)
-                    
-                    task.status = TaskStatus.COMPLETED
-                    task.progress = 1.0
-                    
-                except Exception as e:
-                    logger.error(f"Task {task.id} failed: {e}")
-                    task.status = TaskStatus.FAILED
-                    task.error_message = str(e)
-                
-                finally:
-                    task.completed_at = datetime.now()
-                    self._save_task(task)
-                    
-                    with self._lock:
-                        self._current_tasks.pop(task.id, None)
-                
-            except Exception as e:
-                logger.error(f"Error in process loop: {e}")
-                import time
-                time.sleep(1.0)
-    
-    def _process_task(self, task: Task):
-        """
-        Process a single task.
+        if to_delete:
+            self._save_tasks()
+            logger.info(f"Cleaned up {len(to_delete)} old tasks")
         
-        This method should be overridden by subclasses to implement
-        actual task processing logic.
-        """
-        raise NotImplementedError("Subclasses must implement _process_task")
-    
-    def on_progress(self, callback: Callable[[str, float], None]):
-        """Register progress callback."""
-        self._progress_callbacks.append(callback)
-    
-    def close(self):
-        """Close the task queue."""
-        self.stop(wait=True)
-        
-        if hasattr(self._local, 'connection') and self._local.connection:
-            self._local.connection.close()
-            self._local.connection = None
-
-
-class AudiobookTaskQueue(TaskQueue):
-    """
-    Task queue specifically for audiobook generation.
-    """
-    
-    def __init__(
-        self,
-        generator_factory: Callable,
-        db_path: Optional[str] = None,
-        max_concurrent: int = 1
-    ):
-        """
-        Initialize audiobook task queue.
-        
-        Args:
-            generator_factory: Factory function that returns AudiobookGenerator
-            db_path: Path to SQLite database
-            max_concurrent: Maximum concurrent tasks
-        """
-        super().__init__(db_path=db_path, max_concurrent=max_concurrent)
-        self.generator_factory = generator_factory
-        self._current_generator = None
-    
-    def _process_task(self, task: Task):
-        """Process an audiobook generation task."""
-        from .generator import AudiobookGenerator
-        
-        # Create generator
-        generator = self.generator_factory()
-        self._current_generator = generator
-        
-        try:
-            # Progress callback
-            def on_progress(progress: float):
-                self.update_task_progress(task.id, progress)
-            
-            # Generate audiobook
-            result = generator.generate_audiobook(
-                input_path=task.input_path,
-                output_path=task.output_path,
-                voice=task.voice,
-                chunk_size=task.chunk_size,
-                progress_callback=on_progress
-            )
-            
-            # Update metadata
-            task.metadata['output_path'] = result.output_path
-            task.metadata['duration_seconds'] = result.duration_seconds
-            task.metadata['total_chunks'] = result.total_chunks
-            
-            logger.info(f"Task {task.id} completed: {result.output_path}")
-            
-        finally:
-            generator.close()
-            self._current_generator = None
-    
-    def pause_current_task(self):
-        """Pause the currently running task (if supported by generator)."""
-        # This would require generator to support pause/resume
-        logger.warning("Pause not yet implemented for audiobook generation")
+        return len(to_delete)
