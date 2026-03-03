@@ -20,6 +20,7 @@ from src.generator import AudiobookGenerator
 from src.config import Config, TTSConfig, TextConfig, OutputConfig
 from src.text_processor import TextProcessor
 from src.dialogue_detector import DialogueDetector
+from src.tts_backends.doubao import DoubaoBackend, ModelType
 
 
 # Global state for session
@@ -32,6 +33,7 @@ class SessionState:
     uploaded_file: Optional[str] = None
     text_preview: Optional[str] = None
     detected_characters: Optional[List[str]] = None
+    doubao_backend: Optional[DoubaoBackend] = None
     
     def __post_init__(self):
         if self.cloned_voices is None:
@@ -72,6 +74,7 @@ def detect_characters_from_text(file_path: str) -> List[Dict[str, Any]]:
 def initialize_generator(
     backend: str,
     api_key: str,
+    app_id: str,
     max_workers: int,
     chunk_size: int,
     detect_dialogue: bool
@@ -93,9 +96,18 @@ def initialize_generator(
         )
         
         session.config = config
+        
+        # Initialize Doubao backend separately if needed
+        if backend == "doubao":
+            session.doubao_backend = DoubaoBackend(
+                app_id=app_id if app_id else None,
+                access_token=api_key if api_key else None
+            )
+        
         session.generator = AudiobookGenerator(
             tts_backend=backend,
             api_key=api_key if api_key else None,
+            app_id=app_id if app_id else None,
             max_workers=max_workers,
             config=config
         )
@@ -353,20 +365,26 @@ def create_ui() -> gr.Blocks:
                         gr.Markdown("### 1. Configure TTS Backend")
                         
                         backend_dropdown = gr.Dropdown(
-                            choices=["elevenlabs", "xtts", "kokoro"],
-                            value="elevenlabs",
+                            choices=["elevenlabs", "xtts", "kokoro", "doubao"],
+                            value="doubao",
                             label="TTS Backend"
                         )
                         
                         api_key_input = gr.Textbox(
-                            label="API Key (for ElevenLabs)",
-                            placeholder="sk-...",
+                            label="API Key / Access Token",
+                            placeholder="Enter API key or access token...",
                             type="password",
                             visible=True
                         )
                         
+                        app_id_input = gr.Textbox(
+                            label="App ID (for Doubao)",
+                            placeholder="Enter Doubao App ID (optional)...",
+                            visible=True
+                        )
+                        
                         def toggle_api_key(backend):
-                            return gr.update(visible=(backend == "elevenlabs"))
+                            return gr.update(visible=(backend in ["elevenlabs", "doubao"]))
                         
                         backend_dropdown.change(
                             fn=toggle_api_key,
@@ -384,7 +402,7 @@ def create_ui() -> gr.Blocks:
                         
                         init_btn.click(
                             fn=initialize_generator,
-                            inputs=[backend_dropdown, api_key_input, max_workers_slider,
+                            inputs=[backend_dropdown, api_key_input, app_id_input, max_workers_slider,
                                    gr.State(4000), gr.State(True)],
                             outputs=init_status
                         )
@@ -546,47 +564,327 @@ def create_ui() -> gr.Blocks:
             with gr.TabItem("🎭 Voice Cloning"):
                 
                 gr.Markdown("""
-                ### Clone Custom Voices
+                ### 🎭 Voice Cloning with Doubao
                 
-                Upload 10-20 seconds of clear speech to create a custom voice.
-                You can then use the voice name in generation.
+                Clone any voice with just **5 seconds** of audio. Supports multiple cloning models:
+                - **ICL 2.0** (Recommended): Best quality, fastest training
+                - **ICL 1.0**: Standard voice cloning
+                - **DiT Standard**: Focus on timbre
+                - **DiT Restoration**: Timbre + speaking style
                 """)
                 
-                with gr.Row():
-                    with gr.Column():
-                        voice_name_input = gr.Textbox(
-                            label="Voice Name",
-                            placeholder="e.g., narrator, hero, heroine"
-                        )
-                        
-                        voice_audio_input = gr.Audio(
-                            label="Voice Sample (10-20 seconds)",
-                            type="filepath"
-                        )
-                        
-                        voice_desc_input = gr.Textbox(
-                            label="Description (optional)",
-                            placeholder="e.g., A warm, mature male voice"
-                        )
-                        
-                        clone_btn = gr.Button("Clone Voice", variant="primary")
-                        clone_status = gr.Textbox(label="Status")
-                        
-                        clone_btn.click(
-                            fn=clone_voice_ui,
-                            inputs=[voice_name_input, voice_audio_input, voice_desc_input],
-                            outputs=clone_status
-                        )
+                with gr.Tabs():
+                    # Sub-tab 1: Clone New Voice
+                    with gr.TabItem("➕ Clone New Voice"):
+                        with gr.Row():
+                            with gr.Column():
+                                gr.Markdown("### Voice Information")
+                                
+                                clone_speaker_id = gr.Textbox(
+                                    label="Speaker ID",
+                                    placeholder="e.g., S_narrator, S_hero (must start with S_)",
+                                    value="S_my_voice"
+                                )
+                                
+                                clone_model_type = gr.Dropdown(
+                                    choices=[
+                                        ("ICL 2.0 (Recommended)", "icl2"),
+                                        ("ICL 1.0", "icl1"),
+                                        ("DiT Standard", "dit_standard"),
+                                        ("DiT Restoration", "dit_restoration")
+                                    ],
+                                    value="icl2",
+                                    label="Cloning Model"
+                                )
+                                
+                                clone_language = gr.Dropdown(
+                                    choices=[
+                                        ("Chinese", 0),
+                                        ("English", 1),
+                                        ("Japanese", 2),
+                                        ("Spanish", 3)
+                                    ],
+                                    value=0,
+                                    label="Language"
+                                )
+                                
+                                clone_wait_completion = gr.Checkbox(
+                                    label="Wait for Training Completion",
+                                    value=True,
+                                    info="Wait for voice training to complete (may take 10-30 seconds)"
+                                )
+                            
+                            with gr.Column():
+                                gr.Markdown("### Audio Sample")
+                                
+                                clone_audio_input = gr.Audio(
+                                    label="Upload Voice Sample (5-20 seconds)",
+                                    type="filepath"
+                                )
+                                
+                                clone_status_output = gr.Textbox(
+                                    label="Training Status",
+                                    lines=5,
+                                    interactive=False
+                                )
+                                
+                                clone_btn = gr.Button("🎙️ Start Cloning", variant="primary", size="lg")
+                                
+                                def do_clone_voice(speaker_id, model_type, language, wait_completion, audio_file):
+                                    global session
+                                    
+                                    if not session.doubao_backend:
+                                        return "❌ Please initialize Doubao backend first (in Quick Start tab)"
+                                    
+                                    if not audio_file:
+                                        return "❌ Please upload an audio sample"
+                                    
+                                    try:
+                                        # Map UI values to ModelType
+                                        model_map = {
+                                            "icl1": ModelType.ICL_1_0,
+                                            "icl2": ModelType.ICL_2_0,
+                                            "dit_standard": ModelType.DIT_STANDARD,
+                                            "dit_restoration": ModelType.DIT_RESTORATION
+                                        }
+                                        model = model_map.get(model_type, ModelType.ICL_2_0)
+                                        
+                                        # Start cloning
+                                        cloned = session.doubao_backend.clone_voice(
+                                            sample_audio_path=audio_file,
+                                            speaker_id=speaker_id,
+                                            model_type=model,
+                                            language=language,
+                                            wait_for_completion=wait_completion,
+                                            timeout=120
+                                        )
+                                        
+                                        status_text = f"✅ Voice cloning started!\n\n"
+                                        status_text += f"Speaker ID: {cloned.speaker_id}\n"
+                                        status_text += f"Status: {cloned.status_text}\n"
+                                        status_text += f"Model: {model.name}\n"
+                                        status_text += f"Training Count: {cloned.version}/10"
+                                        
+                                        if cloned.is_ready:
+                                            status_text += "\n\n🎉 Voice is ready to use!"
+                                            session.cloned_voices[speaker_id] = speaker_id
+                                        else:
+                                            status_text += "\n\n⏳ Training in progress..."
+                                        
+                                        return status_text
+                                        
+                                    except Exception as e:
+                                        return f"❌ Error: {str(e)}"
+                                
+                                clone_btn.click(
+                                    fn=do_clone_voice,
+                                    inputs=[clone_speaker_id, clone_model_type, clone_language, clone_wait_completion, clone_audio_input],
+                                    outputs=clone_status_output
+                                )
                     
-                    with gr.Column():
-                        gr.Markdown("### Cloned Voices")
-                        cloned_voices_list = gr.JSON(label="Voice Registry", value={})
-                        
-                        def refresh_voices():
-                            return session.cloned_voices
-                        
-                        refresh_btn = gr.Button("Refresh List")
-                        refresh_btn.click(fn=refresh_voices, outputs=cloned_voices_list)
+                    # Sub-tab 2: Manage Cloned Voices
+                    with gr.TabItem("📋 Manage Voices"):
+                        with gr.Row():
+                            with gr.Column():
+                                gr.Markdown("### Check Voice Status")
+                                
+                                check_speaker_id = gr.Textbox(
+                                    label="Speaker ID",
+                                    placeholder="Enter speaker ID to check..."
+                                )
+                                
+                                check_btn = gr.Button("🔍 Check Status")
+                                check_status_output = gr.Textbox(
+                                    label="Voice Status",
+                                    lines=6,
+                                    interactive=False
+                                )
+                                
+                                def check_voice_status(speaker_id):
+                                    global session
+                                    
+                                    if not session.doubao_backend:
+                                        return "❌ Please initialize Doubao backend first"
+                                    
+                                    if not speaker_id:
+                                        return "❌ Please enter a speaker ID"
+                                    
+                                    try:
+                                        voice = session.doubao_backend.get_voice_status(speaker_id)
+                                        
+                                        status_text = f"📊 Voice Status\n\n"
+                                        status_text += f"Speaker ID: {voice.speaker_id}\n"
+                                        status_text += f"Status: {voice.status_text}\n"
+                                        status_text += f"Training Count: {voice.version}/10\n"
+                                        status_text += f"Model Type: {voice.model_type}\n"
+                                        
+                                        if voice.create_time:
+                                            status_text += f"Created: {voice.create_time}\n"
+                                        
+                                        if voice.is_ready:
+                                            status_text += "\n✅ Ready to use!"
+                                        elif voice.status == 1:
+                                            status_text += "\n⏳ Still training..."
+                                        elif voice.status == 3:
+                                            status_text += "\n❌ Training failed"
+                                        
+                                        return status_text
+                                        
+                                    except Exception as e:
+                                        return f"❌ Error: {str(e)}"
+                                
+                                check_btn.click(
+                                    fn=check_voice_status,
+                                    inputs=check_speaker_id,
+                                    outputs=check_status_output
+                                )
+                            
+                            with gr.Column():
+                                gr.Markdown("### Activate Voice")
+                                
+                                activate_speaker_id = gr.Textbox(
+                                    label="Speaker ID",
+                                    placeholder="Enter speaker ID to activate..."
+                                )
+                                
+                                gr.Markdown("""
+                                ⚠️ **Warning**: Activating a voice will:
+                                - Lock the voice for production use
+                                - Prevent further training (even if under 10 times)
+                                - Make the voice permanent
+                                
+                                Only activate when you're satisfied with the quality!
+                                """)
+                                
+                                activate_btn = gr.Button("🔒 Activate Voice", variant="secondary")
+                                activate_status = gr.Textbox(
+                                    label="Activation Status",
+                                    interactive=False
+                                )
+                                
+                                def activate_voice(speaker_id):
+                                    global session
+                                    
+                                    if not session.doubao_backend:
+                                        return "❌ Please initialize Doubao backend first"
+                                    
+                                    if not speaker_id:
+                                        return "❌ Please enter a speaker ID"
+                                    
+                                    try:
+                                        success = session.doubao_backend.activate_voice(speaker_id)
+                                        if success:
+                                            return f"✅ Voice '{speaker_id}' activated successfully!\n\nThis voice is now locked and ready for production use."
+                                        else:
+                                            return f"❌ Failed to activate voice '{speaker_id}'"
+                                    except Exception as e:
+                                        return f"❌ Error: {str(e)}"
+                                
+                                activate_btn.click(
+                                    fn=activate_voice,
+                                    inputs=activate_speaker_id,
+                                    outputs=activate_status
+                                )
+                    
+                    # Sub-tab 3: Test Cloned Voice
+                    with gr.TabItem("🧪 Test Voice"):
+                        with gr.Row():
+                            with gr.Column():
+                                gr.Markdown("### Test Your Cloned Voice")
+                                
+                                test_speaker_id = gr.Textbox(
+                                    label="Speaker ID",
+                                    placeholder="Enter your cloned speaker ID..."
+                                )
+                                
+                                test_text = gr.Textbox(
+                                    label="Test Text",
+                                    value="你好，这是克隆声音测试。Hello, this is a voice cloning test.",
+                                    lines=3
+                                )
+                                
+                                test_speed = gr.Slider(
+                                    minimum=0.5, maximum=2.0, value=1.0, step=0.1,
+                                    label="Speed"
+                                )
+                                
+                                test_volume = gr.Slider(
+                                    minimum=0.5, maximum=2.0, value=1.0, step=0.1,
+                                    label="Volume"
+                                )
+                                
+                                test_btn = gr.Button("🔊 Generate Test Audio", variant="primary")
+                            
+                            with gr.Column():
+                                test_audio_output = gr.Audio(
+                                    label="Test Audio",
+                                    type="filepath",
+                                    autoplay=False
+                                )
+                                
+                                test_status = gr.Textbox(
+                                    label="Status",
+                                    interactive=False
+                                )
+                                
+                                def test_cloned_voice(speaker_id, text, speed, volume):
+                                    global session
+                                    
+                                    if not session.doubao_backend:
+                                        return None, "❌ Please initialize Doubao backend first"
+                                    
+                                    if not speaker_id:
+                                        return None, "❌ Please enter a speaker ID"
+                                    
+                                    if not text:
+                                        return None, "❌ Please enter test text"
+                                    
+                                    try:
+                                        import tempfile
+                                        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+                                            output_path = f.name
+                                        
+                                        session.doubao_backend.generate_speech(
+                                            text=text,
+                                            voice_id=speaker_id,
+                                            output_path=output_path,
+                                            speed=speed,
+                                            volume=volume
+                                        )
+                                        
+                                        return output_path, f"✅ Test audio generated using voice '{speaker_id}'"
+                                        
+                                    except Exception as e:
+                                        return None, f"❌ Error: {str(e)}"
+                                
+                                test_btn.click(
+                                    fn=test_cloned_voice,
+                                    inputs=[test_speaker_id, test_text, test_speed, test_volume],
+                                    outputs=[test_audio_output, test_status]
+                                )
+                
+                gr.Markdown("---")
+                gr.Markdown("""
+                ### 💡 Voice Cloning Tips
+                
+                **Audio Quality:**
+                - Use 5-20 seconds of clear speech
+                - Record in a quiet environment
+                - Avoid background noise and echo
+                - Speak naturally at normal pace
+                
+                **Model Selection:**
+                - **ICL 2.0**: Best overall quality, fastest training (Recommended)
+                - **ICL 1.0**: Good quality, stable
+                - **DiT Standard**: Focus on timbre only
+                - **DiT Restoration**: Timbre + speaking style (accent, pace)
+                
+                **Training:**
+                - Each voice can be trained up to 10 times
+                - Training takes 10-30 seconds
+                - You can test before activating
+                - Activation is permanent!
+                """)
             
             
             # ===== Tab 4: Batch Processing =====
