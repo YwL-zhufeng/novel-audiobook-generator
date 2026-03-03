@@ -6,14 +6,18 @@ import logging
 from pathlib import Path
 from typing import Optional
 
+from ..exceptions import TTSError
+from ..logging_config import get_logger
+
+logger = get_logger(__name__)
+
 try:
     from TTS.api import TTS
     import torch
     COQUI_AVAILABLE = True
 except ImportError:
     COQUI_AVAILABLE = False
-
-logger = logging.getLogger(__name__)
+    logger.warning("TTS package not available, XTTS backend disabled")
 
 
 class XTTSBackend:
@@ -21,7 +25,10 @@ class XTTSBackend:
     
     def __init__(self, model_name: str = "tts_models/multilingual/multi-dataset/xtts_v2"):
         if not COQUI_AVAILABLE:
-            raise ImportError("TTS package required. Install with: pip install TTS")
+            raise ImportError(
+                "TTS package required. "
+                "Install with: pip install TTS"
+            )
         
         self.model_name = model_name
         self.tts = None
@@ -31,11 +38,18 @@ class XTTSBackend:
     
     def _load_model(self):
         """Load the TTS model."""
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        logger.info(f"Loading XTTS model on {device}...")
-        
-        self.tts = TTS(self.model_name).to(device)
-        logger.info("XTTS model loaded")
+        try:
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            logger.info(f"Loading XTTS model on {device}...")
+            
+            self.tts = TTS(self.model_name).to(device)
+            logger.info("XTTS model loaded successfully")
+            
+        except Exception as e:
+            raise TTSError(
+                f"Failed to load XTTS model: {e}",
+                backend="xtts"
+            )
     
     def clone_voice(
         self,
@@ -53,7 +67,13 @@ class XTTSBackend:
         Returns:
             Voice ID (sample path)
         """
-        return str(Path(sample_audio_path).absolute())
+        path = Path(sample_audio_path).absolute()
+        if not path.exists():
+            raise TTSError(
+                f"Sample audio not found: {sample_audio_path}",
+                backend="xtts"
+            )
+        return str(path)
     
     def generate_speech(
         self,
@@ -73,16 +93,25 @@ class XTTSBackend:
             stability: Ignored for XTTS
             similarity_boost: Ignored for XTTS
         """
-        self.tts.tts_to_file(
-            text=text,
-            speaker_wav=voice_id,
-            language="zh" if self._is_chinese(text) else "en",
-            file_path=output_path
-        )
-        
-        logger.debug(f"Generated speech saved to {output_path}")
+        try:
+            self.tts.tts_to_file(
+                text=text,
+                speaker_wav=voice_id,
+                language="zh" if self._is_chinese(text) else "en",
+                file_path=output_path
+            )
+            
+            logger.debug(f"Generated speech saved to {output_path}")
+            
+        except Exception as e:
+            raise TTSError(
+                f"TTS generation failed: {e}",
+                backend="xtts"
+            )
     
     def _is_chinese(self, text: str) -> bool:
         """Check if text is primarily Chinese."""
+        if not text:
+            return False
         chinese_chars = sum(1 for char in text if '\u4e00' <= char <= '\u9fff')
         return chinese_chars > len(text) * 0.3

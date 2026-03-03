@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  audiobook-generator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: novel-audiobook-generator:latest
+    container_name: audiobook-generator
+    ports:
+      - "7860:7860"
+    volumes:
+      - ./input:/app/input:ro
+      - ./output:/app/output
+      - ./config:/app/config:ro
+      - audiobook-cache:/app/.cache
+    environment:
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY:-}
+      - DOUBAO_APP_ID=${DOUBAO_APP_ID:-}
+      - DOUBAO_ACCESS_TOKEN=${DOUBAO_ACCESS_TOKEN:-}
+      - MAX_WORKERS=${MAX_WORKERS:-4}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:7860/')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Redis for distributed caching
+  redis:
+    image: redis:7-alpine
+    container_name: audiobook-redis
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    profiles:
+      - distributed
+
+  # Optional: Monitoring with Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: audiobook-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # Optional: Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: audiobook-grafana
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+volumes:
+  audiobook-cache:
+  redis-data:
+  prometheus-data:
+  grafana-data:

@@ -4,22 +4,43 @@ Main generator class for converting novels to audiobooks.
 """
 
 import os
+import sys
 import json
 import asyncio
-import logging
-from pathlib import Path
-from typing import Optional, Dict, List, Callable
-from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import tempfile
+from pathlib import Path
+from typing import Optional, Dict, List, Callable, Any, Tuple, Set
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
 from .text_processor import TextProcessor
 from .dialogue_detector import DialogueDetector, DialogueSegment
 from .voice_manager import VoiceManager
 from .audio_utils import AudioUtils
 from .config import Config
+from .progress_manager import ProgressManager, ProgressState
+from .logging_config import get_logger, PerformanceLogger
+from .exceptions import (
+    AudiobookGeneratorError,
+    TextProcessingError,
+    TTSError,
+    AudioProcessingError,
+    get_user_friendly_message
+)
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
+
+
+@dataclass
+class GenerationResult:
+    """Result of audiobook generation."""
+    output_path: str
+    total_chunks: int
+    completed_chunks: int
+    failed_chunks: int
+    duration_seconds: float
+    metadata: Dict[str, Any]
 
 
 class AudiobookGenerator:
@@ -29,21 +50,27 @@ class AudiobookGenerator:
         self,
         tts_backend: str = "elevenlabs",
         api_key: Optional[str] = None,
+        app_id: Optional[str] = None,
+        access_token: Optional[str] = None,
         output_dir: str = "output",
         temp_dir: Optional[str] = None,
         max_workers: int = 4,
-        config: Optional[Config] = None
+        config: Optional[Config] = None,
+        enable_progress_persistence: bool = True
     ):
         """
         Initialize the audiobook generator.
         
         Args:
-            tts_backend: TTS backend to use ('elevenlabs', 'xtts', 'kokoro')
+            tts_backend: TTS backend to use ('elevenlabs', 'xtts', 'kokoro', 'doubao')
             api_key: API key for cloud TTS services
+            app_id: App ID for Doubao/Volcano Engine
+            access_token: Access token for Doubao (alternative to api_key)
             output_dir: Directory for output files
             temp_dir: Directory for temporary files
             max_workers: Maximum concurrent workers for TTS generation
             config: Configuration object
+            enable_progress_persistence: Whether to enable SQLite progress persistence
         """
         self.config = config
         self.tts_backend = tts_backend
@@ -56,14 +83,24 @@ class AudiobookGenerator:
         self.max_workers = max_workers
         self.executor = ThreadPoolExecutor(max_workers=max_workers)
         
+        # Initialize performance logger
+        self.perf_logger = PerformanceLogger(logger)
+        
+        # Initialize progress manager
+        self.progress_manager: Optional[ProgressManager] = None
+        if enable_progress_persistence:
+            self.progress_manager = ProgressManager()
+        
         # Initialize components
         self.text_processor = TextProcessor()
         self.dialogue_detector = DialogueDetector()
-        self.voice_manager = VoiceManager(tts_backend, api_key)
+        self.voice_manager = VoiceManager(
+            tts_backend=tts_backend,
+            api_key=api_key,
+            app_id=app_id,
+            access_token=access_token
+        )
         self.audio_utils = AudioUtils()
-        
-        # Progress tracking
-        self.progress_file = self.temp_dir / "progress.json"
         
         logger.info(f"Initialized AudiobookGenerator with {tts_backend} backend ({max_workers} workers)")
     
@@ -82,10 +119,10 @@ class AudiobookGenerator:
         output_path: Optional[str] = None,
         voice: str = "default",
         chunk_size: int = 5000,
-        progress_callback: Optional[Callable] = None,
+        progress_callback: Optional[Callable[[float], None]] = None,
         resume: bool = True,
         metadata: Optional[Dict[str, Any]] = None
-    ) -> str:
+    ) -> GenerationResult:
         """
         Generate audiobook from novel file with concurrent processing.
         
@@ -94,12 +131,17 @@ class AudiobookGenerator:
             output_path: Output audio file path
             voice: Voice to use
             chunk_size: Maximum characters per chunk
-            progress_callback: Optional progress callback
+            progress_callback: Optional progress callback (receives 0.0-1.0)
             resume: Whether to resume from previous run
             metadata: Optional metadata dict (title, artist, album, cover_image, etc.)
             
         Returns:
-            Path to generated audiobook file
+            GenerationResult with details about the generation
+            
+        Raises:
+            TextProcessingError: If text extraction fails
+            TTSError: If TTS generation fails
+            AudioProcessingError: If audio processing fails
         """
         input_path = Path(input_path)
         if not input_path.exists():
@@ -110,76 +152,141 @@ class AudiobookGenerator:
         else:
             output_path = Path(output_path)
         
-        # Load progress if resuming
-        progress = self._load_progress() if resume else {}
-        completed_chunks = set(progress.get('completed_chunks', []))
+        # Generate task ID
+        task_id = self._generate_task_id(input_path, voice, chunk_size)
+        
+        # Load or create progress
+        progress_state = None
+        if resume and self.progress_manager:
+            progress_state = self.progress_manager.get_task(task_id)
+            if progress_state:
+                logger.info(f"Resuming task {task_id}: {progress_state.progress_percentage:.1f}% complete")
         
         logger.info(f"Processing {input_path}")
         
         # Extract and process text
-        text = self.text_processor.extract_text(str(input_path))
+        with self.perf_logger.timer("text_extraction"):
+            text = self.text_processor.extract_text(str(input_path))
         logger.info(f"Extracted {len(text)} characters")
         
+        # Split into chunks
         chunks = self.text_processor.split_into_chunks(text, chunk_size)
         logger.info(f"Split into {len(chunks)} chunks")
         
-        # Generate audio concurrently
-        audio_segments = [None] * len(chunks)
+        # Create progress state if not resuming
+        if progress_state is None and self.progress_manager:
+            progress_state = self.progress_manager.create_task(
+                task_id=task_id,
+                input_file=str(input_path),
+                output_file=str(output_path),
+                total_chunks=len(chunks),
+                metadata={'voice': voice, 'chunk_size': chunk_size}
+            )
         
-        def generate_chunk(args):
+        # Track completed chunks
+        completed_chunks: Set[int] = set(progress_state.completed_chunks) if progress_state else set()
+        failed_chunks: Set[int] = set()
+        
+        # Generate audio concurrently
+        audio_segments: List[Optional[str]] = [None] * len(chunks)
+        
+        def generate_chunk(args: Tuple[int, str]) -> Tuple[int, str, Optional[str]]:
+            """Generate audio for a single chunk."""
             idx, chunk_text = args
+            
+            # Check if already completed
             if idx in completed_chunks:
-                # Reuse existing audio
                 existing_path = self.temp_dir / f"chunk_{idx:04d}.mp3"
                 if existing_path.exists():
-                    logger.info(f"Reusing chunk {idx+1}/{len(chunks)}")
-                    return idx, str(existing_path)
+                    logger.debug(f"Reusing chunk {idx+1}/{len(chunks)}")
+                    return idx, str(existing_path), None
             
             audio_path = self.temp_dir / f"chunk_{idx:04d}.mp3"
+            
             try:
                 self.voice_manager.generate_speech(chunk_text, voice, str(audio_path))
-                logger.info(f"Generated chunk {idx+1}/{len(chunks)}")
-                return idx, str(audio_path)
+                logger.debug(f"Generated chunk {idx+1}/{len(chunks)}")
+                return idx, str(audio_path), None
             except Exception as e:
                 logger.error(f"Failed to generate chunk {idx+1}: {e}")
-                raise
+                return idx, None, str(e)
         
-        # Process chunks in parallel
+        # Process chunks in parallel with progress tracking
+        total_tasks = len(chunks)
+        completed_count = len(completed_chunks)
+        
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [
-                executor.submit(generate_chunk, (i, chunk))
+            # Submit all tasks
+            futures = {
+                executor.submit(generate_chunk, (i, chunk)): i
                 for i, chunk in enumerate(chunks)
-            ]
+                if i not in completed_chunks
+            }
             
-            for i, future in enumerate(futures):
-                idx, audio_path = future.result()
-                audio_segments[idx] = audio_path
-                completed_chunks.add(idx)
+            # Process completed futures
+            for future in as_completed(futures):
+                idx, audio_path, error = future.result()
                 
-                # Save progress
-                self._save_progress({
-                    'input_file': str(input_path),
-                    'completed_chunks': list(completed_chunks),
-                    'total_chunks': len(chunks)
-                })
+                if error:
+                    failed_chunks.add(idx)
+                    if self.progress_manager:
+                        self.progress_manager.mark_chunk_failed(task_id, idx, error)
+                else:
+                    audio_segments[idx] = audio_path
+                    completed_chunks.add(idx)
+                    completed_count += 1
+                    
+                    # Save progress
+                    if self.progress_manager:
+                        self.progress_manager.mark_chunk_complete(task_id, idx)
                 
+                # Call progress callback
                 if progress_callback:
-                    progress_callback((i + 1) / len(chunks))
+                    progress_callback(completed_count / total_tasks)
         
-        # Concatenate audio with metadata
-        logger.info("Concatenating audio segments...")
-        self.audio_utils.concatenate_audio_files(
-            [s for s in audio_segments if s],
-            str(output_path),
-            metadata=metadata
-        )
+        # Check for failures
+        if failed_chunks:
+            logger.warning(f"{len(failed_chunks)} chunks failed to generate")
+            if len(failed_chunks) > len(chunks) * 0.1:  # More than 10% failed
+                raise TTSError(
+                    f"Too many chunks failed ({len(failed_chunks)}/{len(chunks)}). "
+                    "Check logs for details."
+                )
         
-        # Cleanup
-        self._cleanup_temp_files(audio_segments)
-        self.progress_file.unlink(missing_ok=True)
+        # Concatenate audio
+        with self.perf_logger.timer("audio_concatenation"):
+            logger.info("Concatenating audio segments...")
+            valid_segments = [s for s in audio_segments if s is not None]
+            self.audio_utils.concatenate_audio_files(
+                valid_segments,
+                str(output_path),
+                metadata=metadata
+            )
+        
+        # Get audio duration
+        duration = self.audio_utils.get_audio_duration(str(output_path))
+        
+        # Cleanup temp files
+        self._cleanup_temp_files([s for s in audio_segments if s])
+        
+        # Mark task as completed
+        if self.progress_manager:
+            self.progress_manager.update_task(
+                task_id,
+                status='completed',
+                metadata={'duration_seconds': duration}
+            )
         
         logger.info(f"Audiobook saved to {output_path}")
-        return str(output_path)
+        
+        return GenerationResult(
+            output_path=str(output_path),
+            total_chunks=len(chunks),
+            completed_chunks=len(completed_chunks),
+            failed_chunks=len(failed_chunks),
+            duration_seconds=duration,
+            metadata=metadata or {}
+        )
     
     def generate_with_characters(
         self,
@@ -208,6 +315,8 @@ class AudiobookGenerator:
         
         if output_path is None:
             output_path = self.output_dir / f"{input_path.stem}_audiobook.mp3"
+        else:
+            output_path = Path(output_path)
         
         # Extract text
         text = self.text_processor.extract_text(str(input_path))
@@ -243,24 +352,6 @@ class AudiobookGenerator:
         self._cleanup_temp_files(segment_files)
         
         return str(output_path)
-    
-    def _load_progress(self) -> dict:
-        """Load progress from file."""
-        if self.progress_file.exists():
-            with open(self.progress_file, 'r') as f:
-                return json.load(f)
-        return {}
-    
-    def _save_progress(self, progress: dict):
-        """Save progress to file."""
-        with open(self.progress_file, 'w') as f:
-            json.dump(progress, f)
-    
-    def _cleanup_temp_files(self, files: List[str]):
-        """Clean up temporary audio files."""
-        for file_path in files:
-            if file_path:
-                Path(file_path).unlink(missing_ok=True)
     
     def generate_preview(
         self,
@@ -310,7 +401,7 @@ class AudiobookGenerator:
         character_voices: Optional[Dict[str, str]] = None,
         preview_length: int = 500,
         output_path: Optional[str] = None
-    ) -> tuple:
+    ) -> Tuple[str, str]:
         """
         Generate preview with character voices.
         
@@ -421,13 +512,14 @@ class AudiobookGenerator:
                     if metadata:
                         self.audio_utils.add_metadata(output_path, metadata)
                 else:
-                    output_path = self.generate_audiobook(
+                    gen_result = self.generate_audiobook(
                         input_path=input_path,
                         voice=voice,
                         chunk_size=chunk_size,
                         progress_callback=file_progress,
                         metadata=metadata
                     )
+                    output_path = gen_result.output_path
                 
                 result['output'] = output_path
                 result['status'] = 'completed'
@@ -441,3 +533,67 @@ class AudiobookGenerator:
             results.append(result)
         
         return results
+    
+    def get_incomplete_tasks(self) -> List[ProgressState]:
+        """Get list of incomplete generation tasks."""
+        if self.progress_manager:
+            return self.progress_manager.get_incomplete_tasks()
+        return []
+    
+    def resume_task(self, task_id: str, progress_callback: Optional[Callable[[float], None]] = None) -> GenerationResult:
+        """
+        Resume a specific task.
+        
+        Args:
+            task_id: Task ID to resume
+            progress_callback: Optional progress callback
+            
+        Returns:
+            GenerationResult
+        """
+        if not self.progress_manager:
+            raise AudiobookGeneratorError("Progress persistence not enabled")
+        
+        state = self.progress_manager.get_task(task_id)
+        if not state:
+            raise ResourceNotFoundError(f"Task not found: {task_id}")
+        
+        # Extract voice and chunk_size from metadata
+        voice = state.metadata.get('voice', 'default')
+        chunk_size = state.metadata.get('chunk_size', 5000)
+        
+        return self.generate_audiobook(
+            input_path=state.input_file,
+            output_path=state.output_file,
+            voice=voice,
+            chunk_size=chunk_size,
+            progress_callback=progress_callback,
+            resume=True
+        )
+    
+    def _generate_task_id(self, input_path: Path, voice: str, chunk_size: int) -> str:
+        """Generate unique task ID based on input parameters."""
+        data = f"{input_path.absolute()}:{voice}:{chunk_size}"
+        return hashlib.md5(data.encode()).hexdigest()[:16]
+    
+    def _cleanup_temp_files(self, files: List[str]):
+        """Clean up temporary audio files."""
+        for file_path in files:
+            if file_path:
+                try:
+                    Path(file_path).unlink(missing_ok=True)
+                except Exception as e:
+                    logger.warning(f"Failed to cleanup temp file {file_path}: {e}")
+    
+    def close(self):
+        """Clean up resources."""
+        self.executor.shutdown(wait=True)
+        if self.progress_manager:
+            self.progress_manager.close()
+        logger.info("AudiobookGenerator closed")
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()

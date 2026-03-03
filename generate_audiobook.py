@@ -57,9 +57,21 @@ Examples:
     
     parser.add_argument(
         "--backend",
-        choices=["elevenlabs", "xtts", "kokoro"],
+        choices=["elevenlabs", "xtts", "kokoro", "doubao"],
         default=None,
         help="TTS backend to use"
+    )
+    
+    parser.add_argument(
+        "--app-id",
+        help="App ID for Doubao/Volcano Engine",
+        default=os.getenv("DOUBAO_APP_ID")
+    )
+    
+    parser.add_argument(
+        "--access-token",
+        help="Access token for Doubao (alternative to API key)",
+        default=os.getenv("DOUBAO_ACCESS_TOKEN")
     )
     
     parser.add_argument(
@@ -131,6 +143,8 @@ Examples:
     # Determine settings (CLI args override config)
     backend = args.backend or (config.tts.backend if config else "elevenlabs")
     api_key = args.api_key or (config.tts.api_key if config else None)
+    app_id = args.app_id or (config.tts.app_id if config else None)
+    access_token = args.access_token or (config.tts.access_token if config else None)
     chunk_size = args.chunk_size or (config.text.chunk_size if config else 4000)
     workers = args.workers or (config.tts.max_workers if config else 4)
     
@@ -139,6 +153,8 @@ Examples:
         generator = AudiobookGenerator(
             tts_backend=backend,
             api_key=api_key,
+            app_id=app_id,
+            access_token=access_token,
             max_workers=workers,
             config=config
         )

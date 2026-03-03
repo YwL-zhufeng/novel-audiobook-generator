@@ -3,11 +3,12 @@ Configuration management for audiobook generator.
 """
 
 import os
+import re
 import yaml
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional
-from dataclasses import dataclass, field
+from typing import Dict, Any, Optional, List, Union
+from dataclasses import dataclass, field, asdict
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,7 @@ class VoiceConfig:
     stability: float = 0.5
     similarity_boost: float = 0.75
     model: Optional[str] = None
+    description: Optional[str] = None
 
 
 @dataclass
@@ -39,7 +41,7 @@ class TextConfig:
     """Text processing configuration."""
     chunk_size: int = 4000
     detect_dialogue: bool = True
-    dialogue_patterns: list = field(default_factory=list)
+    dialogue_patterns: List[str] = field(default_factory=list)
     language: str = "auto"
 
 
@@ -62,10 +64,17 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
     
     @classmethod
-    def from_yaml(cls, path: str) -> "Config":
+    def from_yaml(cls, path: Union[str, Path]) -> "Config":
         """Load configuration from YAML file."""
+        path = Path(path)
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+        
         with open(path, 'r', encoding='utf-8') as f:
             data = yaml.safe_load(f)
+        
+        if data is None:
+            data = {}
         
         # Expand environment variables
         data = cls._expand_env_vars(data)
@@ -111,8 +120,11 @@ class Config:
             return result
         return obj
     
-    def to_yaml(self, path: str):
+    def to_yaml(self, path: Union[str, Path]):
         """Save configuration to YAML file."""
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        
         data = {
             'tts': {
                 'backend': self.tts.backend,
@@ -143,6 +155,3 @@ class Config:
         if isinstance(voice_data, dict):
             return VoiceConfig(**voice_data)
         return VoiceConfig()
-
-
-import re

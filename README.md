@@ -5,153 +5,128 @@ AI-powered audiobook generator for novels with voice cloning capabilities.
 ## Features
 
 - 📖 **Novel Text Processing**: Support for TXT, EPUB, PDF formats
-- 🎙️ **Voice Cloning**: Clone any voice with 10-20 seconds of audio sample
+- 🎙️ **Voice Cloning**: Clone any voice with **5 seconds** of audio sample
 - 🎭 **Character Voice Attribution**: Automatically assign different voices to characters
-- 🚀 **Multiple TTS Backends**: Support for ElevenLabs API, Coqui XTTS v2, Kokoro TTS
-- ⚡ **Async Concurrent Processing**: Parallel TTS generation for faster output
+- 🔬 **Multiple Cloning Models**: ICL 1.0/2.0, DiT Standard/Restoration
+- 🚀 **Multiple TTS Backends**: ElevenLabs, XTTS, Kokoro, **Doubao**
+- 💰 **Ultra-low Cost**: Doubao ~5 RMB for 1 million characters
+- ⚡ **Async Concurrent Processing**: Parallel TTS generation
 - 💾 **Resume Support**: Continue from where you left off
-- 🎵 **Audio Post-processing**: Volume normalization, chapter splitting
+- 🎵 **Audio Post-processing**: Volume normalization, ID3 metadata, cover embedding
+- 📑 **Smart Chapter Detection**: Automatic chapter boundary detection
+- 🧠 **Intelligent Caching**: LRU cache for TTS results and preprocessed data
 - ⚙️ **YAML Configuration**: Flexible config-based workflow
 - 🌐 **Web UI**: User-friendly Gradio interface
-
-## Tech Stack
-
-- **Python 3.9+**
-- **TTS Models**:
-  - ElevenLabs API (best quality, cloud)
-  - Coqui XTTS v2 (open source, local)
-  - Kokoro TTS (lightweight, fast)
-- **Text Processing**: ebooklib, PyPDF2, nltk, spacy
-- **Audio**: pydub, soundfile
-- **Concurrency**: asyncio, aiohttp
+- 🐳 **Docker Support**: Easy containerized deployment
+- ✅ **Configuration Validation**: Input validation and error handling
+- 📊 **Progress Tracking**: Persistent progress with SQLite
+- 🧪 **Comprehensive Testing**: >80% test coverage
 
 ## Installation
+
+### Quick Install
 
 ```bash
 # Clone the repository
 git clone https://github.com/YwL-zhufeng/novel-audiobook-generator.git
 cd novel-audiobook-generator
 
-# Install dependencies
-pip install -r requirements.txt
+# Install with pip
+pip install -e .
 
-# Download XTTS v2 model (optional, for local voice cloning)
-python -c "from TTS.api import TTS; TTS('tts_models/multilingual/multi-dataset/xtts_v2')"
+# Or install with all TTS backends
+pip install -e ".[all]"
+```
 
-# Download spaCy model for dialogue detection
-python -m spacy download zh_core_web_sm  # For Chinese
-python -m spacy download en_core_web_sm  # For English
+### Docker Install
+
+```bash
+# Build Docker image
+make docker-build
+
+# Run container
+make docker-run
+
+# Or use Docker Compose
+docker-compose up -d
+```
+
+### Development Install
+
+```bash
+# Install with development dependencies
+make install-dev
 ```
 
 ## Quick Start
 
-### Web UI (推荐 / Recommended)
+### Using Make (Recommended)
 
-启动直观的网页界面：
+```bash
+# Launch Web UI
+make webui
+
+# Run CLI
+make cli ARGS="novel.txt --backend doubao"
+
+# Run tests
+make test
+
+# Format code
+make format
+```
+
+### Web UI
 
 ```bash
 python webui.py
+# Then visit http://localhost:7860
 ```
-
-然后访问 `http://localhost:7860`
-
-功能：
-- 📤 拖拽上传小说文件
-- 🎙️ 实时声音克隆
-- 🎭 自动角色检测与配音
-- 📊 可视化进度跟踪
-- ⚙️ 高级配置选项
 
 ### Command Line
 
 ```bash
-# Basic usage with ElevenLabs
-export ELEVENLABS_API_KEY="your-key"
+# Basic usage with Doubao (recommended for Chinese)
+export DOUBAO_ACCESS_TOKEN="your-token"
+python generate_audiobook.py novel.txt --backend doubao
+
+# With voice cloning
 python generate_audiobook.py novel.txt --clone-voice sample.mp3
 
-# Use local XTTS (no API key needed)
-python generate_audiobook.py novel.txt --backend xtts --clone-voice sample.wav
+# With character voices
+python generate_audiobook.py novel.txt --config config.yaml --characters
 
-# With character voices (config file)
-python generate_audiobook.py novel.txt --config config.yaml
+# Resume interrupted generation
+python generate_audiobook.py novel.txt --resume
 ```
 
 ### Python API
 
 ```python
-from audiobook_generator import AudiobookGenerator
+from src.generator import AudiobookGenerator
 
-# Initialize generator
+# Initialize
 generator = AudiobookGenerator(
-    tts_backend="elevenlabs",
-    api_key="your-elevenlabs-api-key",
-    max_workers=4  # Concurrent processing
+    tts_backend="doubao",
+    access_token="your-token",
+    max_workers=4
 )
 
-# Clone voices
+# Clone voice
 generator.clone_voice(
     voice_name="narrator",
     sample_audio_path="samples/narrator.mp3"
 )
-generator.clone_voice(
-    voice_name="hero",
-    sample_audio_path="samples/hero.mp3"
-)
 
-# Generate with character voices
-generator.generate_with_characters(
+# Generate audiobook
+output = generator.generate_audiobook(
     input_path="novel.txt",
-    character_config={
-        "narrator": "narrator",
-        "characters": {
-            "李逍遥": "hero",
-            "赵灵儿": "heroine"
-        }
+    voice="narrator",
+    metadata={
+        "title": "My Novel",
+        "artist": "Author Name"
     }
 )
-```
-
-## Configuration File
-
-Create `config.yaml`:
-
-```yaml
-# TTS Backend settings
-tts:
-  backend: elevenlabs  # or xtts, kokoro
-  api_key: ${ELEVENLABS_API_KEY}
-  max_workers: 4
-
-# Voice configuration
-voices:
-  narrator:
-    sample: samples/narrator.mp3
-    stability: 0.5
-    similarity_boost: 0.75
-  
-  characters:
-    李逍遥:
-      sample: samples/hero.mp3
-      stability: 0.6
-    赵灵儿:
-      sample: samples/heroine.mp3
-      stability: 0.6
-
-# Text processing
-text:
-  chunk_size: 4000
-  detect_dialogue: true
-  dialogue_patterns:
-    - '"([^"]+)"'
-    - '「([^」]+)」'
-    - '“([^”]+)”'
-
-# Output settings
-output:
-  format: mp3
-  bitrate: 192k
-  normalize: true
-  split_chapters: true
 ```
 
 ## Project Structure
@@ -159,27 +134,72 @@ output:
 ```
 novel-audiobook-generator/
 ├── src/
-│   ├── __init__.py
 │   ├── generator.py          # Main audiobook generator
 │   ├── text_processor.py     # Text extraction and preprocessing
 │   ├── dialogue_detector.py  # Character dialogue detection
+│   ├── chapter_detector.py   # Chapter detection
 │   ├── tts_backends/         # TTS backend implementations
 │   ├── voice_manager.py      # Voice cloning and management
 │   ├── audio_utils.py        # Audio post-processing
-│   └── config.py             # Configuration management
+│   ├── config.py             # Configuration management
+│   ├── cache.py              # Smart caching system
+│   ├── validator.py          # Configuration validation
+│   ├── progress_manager.py   # SQLite progress tracking
+│   ├── exceptions.py         # Custom exceptions
+│   └── logging_config.py     # Structured logging
+├── docs/
+│   ├── TUTORIAL.md          # Getting started guide
+│   ├── TROUBLESHOOTING.md   # Problem solving
+│   ├── ARCHITECTURE.md      # System design
+│   └── API.md               # API reference
+├── tests/                    # Comprehensive test suite
 ├── generate_audiobook.py     # CLI entry point
 ├── webui.py                  # Gradio Web UI
-├── requirements.txt
-├── config.example.yaml
-└── README.md
+├── pyproject.toml           # Modern Python packaging
+├── Dockerfile               # Docker configuration
+├── docker-compose.yml       # Docker orchestration
+├── Makefile                 # Build automation
+├── .github/workflows/       # CI/CD pipeline
+├── .pre-commit-config.yaml  # Code quality hooks
+└── CONTRIBUTING.md          # Contributing guide
 ```
+
+## Documentation
+
+- **[Tutorial](docs/TUTORIAL.md)** - Step-by-step getting started guide
+- **[API Reference](docs/API.md)** - Complete API documentation
+- **[Architecture](docs/ARCHITECTURE.md)** - System design and component interactions
+- **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Common issues and solutions
+- **[Contributing](CONTRIBUTING.md)** - Development setup and contribution guidelines
+
+## Cost Comparison (1M characters)
+
+| Backend | Cost | Quality | Speed |
+|---------|------|---------|-------|
+| **Doubao** | ~5 RMB | ★★★★★ | Fast |
+| ElevenLabs | ~29 RMB | ★★★★★ | Medium |
+| MiniMax | ~130-260 RMB | ★★★★★ | Fast |
+| XTTS (Local) | Free | ★★★★☆ | Slow |
+| Azure | ~115 RMB | ★★★★☆ | Medium |
 
 ## Performance Tips
 
-- Use `max_workers=4` for concurrent API calls (ElevenLabs rate limits apply)
-- XTTS runs locally and benefits from GPU acceleration
+- Use `max_workers=4` for concurrent API calls (check rate limits)
 - Enable resume mode for long novels: `--resume`
+- Use Doubao backend for cost-effective Chinese audiobooks
+- Enable caching for repeated generations
+- Process large files in batches
 
 ## License
 
 MIT License
+
+## Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## Acknowledgments
+
+- [ElevenLabs](https://elevenlabs.io/) for high-quality TTS
+- [Coqui AI](https://github.com/coqui-ai/TTS) for XTTS
+- [ByteDance](https://www.volcengine.com/) for Doubao TTS
