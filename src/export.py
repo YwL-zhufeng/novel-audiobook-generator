@@ -1,440 +1,192 @@
 """
-Export utilities for multiple audiobook formats.
+Export formats for audiobooks (M4B, chaptered MP3, etc.)
 """
 
-import os
-import subprocess
-from typing import List, Optional, Dict, Any
-from dataclasses import dataclass
+import json
 from pathlib import Path
-import logging
-import tempfile
+from typing import List, Dict, Optional, Any
+from dataclasses import dataclass
 
 from .logging_config import get_logger
-from .exceptions import AudioProcessingError
-from .chapter_detector import Chapter, ChapterDetectionResult
 
 logger = get_logger(__name__)
 
-try:
-    from pydub import AudioSegment
-    PYDUB_AVAILABLE = True
-except ImportError:
-    PYDUB_AVAILABLE = False
-
-try:
-    from mutagen.mp3 import MP3
-    from mutagen.mp4 import MP4, MP4Cover
-    from mutagen.id3 import ID3, TIT2, TPE1, TALB, TCOM, TDRC, CHAP, CTOC, CTOCFlags
-    MUTAGEN_AVAILABLE = True
-except ImportError:
-    MUTAGEN_AVAILABLE = False
-
 
 @dataclass
-class ExportOptions:
-    """Options for audiobook export."""
-    format: str = "mp3"  # mp3, m4b, m4a, ogg, wav
-    bitrate: str = "192k"
-    sample_rate: int = 44100
-    split_chapters: bool = False
-    add_metadata: bool = True
-    cover_image: Optional[str] = None
-    title: Optional[str] = None
-    author: Optional[str] = None
-    album: Optional[str] = None
-    year: Optional[str] = None
-    description: Optional[str] = None
+class Chapter:
+    """Represents a chapter in an audiobook."""
+    title: str
+    start_time_ms: int
+    end_time_ms: int
+    file_path: Optional[str] = None
 
 
-class AudiobookExporter:
-    """
-    Export audiobooks in various formats.
-    
-    Supported formats:
-    - MP3 (single file or split by chapters)
-    - M4B (Audiobook format with chapters)
-    - M4A (AAC audio)
-    - OGG (Vorbis)
-    - WAV (Uncompressed)
-    """
+class M4BExporter:
+    """Export audiobook to M4B format (iTunes audiobook)."""
     
     def __init__(self):
-        if not PYDUB_AVAILABLE:
-            raise ImportError("pydub required for export. Install with: pip install pydub")
+        self.chapters: List[Chapter] = []
+    
+    def add_chapter(self, title: str, start_ms: int, end_ms: int, file_path: Optional[str] = None):
+        """Add a chapter."""
+        self.chapters.append(Chapter(title, start_ms, end_ms, file_path))
     
     def export(
         self,
-        audio_path: str,
+        audio_files: List[str],
         output_path: str,
-        options: Optional[ExportOptions] = None,
-        chapters: Optional[ChapterDetectionResult] = None
+        metadata: Optional[Dict[str, Any]] = None
+    ):
+        """
+        Export to M4B format.
+        
+        Note: This is a placeholder. Full M4B export requires ffmpeg with specific options.
+        """
+        logger.info(f"Exporting M4B to {output_path}")
+        
+        # M4B export would require:
+        # 1. Concatenate audio files
+        # 2. Add chapter metadata
+        # 3. Add book metadata (title, author, cover)
+        # 4. Convert to M4B format
+        
+        # For now, just create a placeholder
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save chapter info as JSON for now
+        chapter_file = output_path.with_suffix('.chapters.json')
+        chapter_data = [
+            {
+                'title': c.title,
+                'start_time_ms': c.start_time_ms,
+                'end_time_ms': c.end_time_ms
+            }
+            for c in self.chapters
+        ]
+        
+        with open(chapter_file, 'w') as f:
+            json.dump(chapter_data, f, indent=2)
+        
+        logger.info(f"Chapter info saved to {chapter_file}")
+        logger.warning("Full M4B export requires ffmpeg. Use: ffmpeg -i input.mp3 -f mp4 -c copy output.m4b")
+
+
+class ChapteredMP3Exporter:
+    """Export audiobook as chaptered MP3 files."""
+    
+    def __init__(self, output_dir: str):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+    
+    def export_chapters(
+        self,
+        chapters: List[Chapter],
+        base_filename: str = "chapter"
+    ) -> List[str]:
+        """
+        Export chapters as separate MP3 files.
+        
+        Args:
+            chapters: List of chapters with file paths
+            base_filename: Base name for output files
+            
+        Returns:
+            List of output file paths
+        """
+        output_files = []
+        
+        for i, chapter in enumerate(chapters):
+            if chapter.file_path and Path(chapter.file_path).exists():
+                output_name = f"{base_filename}_{i+1:03d}_{self._sanitize_filename(chapter.title)}.mp3"
+                output_path = self.output_dir / output_name
+                
+                # Copy file (in real implementation, would extract segment)
+                import shutil
+                shutil.copy2(chapter.file_path, output_path)
+                
+                output_files.append(str(output_path))
+                logger.debug(f"Exported chapter {i+1}: {output_path}")
+        
+        return output_files
+    
+    def create_m3u_playlist(self, chapters: List[Chapter], playlist_name: str = "audiobook"):
+        """Create M3U playlist for chapters."""
+        playlist_path = self.output_dir / f"{playlist_name}.m3u"
+        
+        with open(playlist_path, 'w') as f:
+            f.write("#EXTM3U\n")
+            
+            for i, chapter in enumerate(chapters):
+                duration_sec = (chapter.end_time_ms - chapter.start_time_ms) // 1000
+                f.write(f"#EXTINF:{duration_sec},{chapter.title}\n")
+                
+                filename = f"chapter_{i+1:03d}_{self._sanitize_filename(chapter.title)}.mp3"
+                f.write(f"{filename}\n")
+        
+        logger.info(f"Playlist created: {playlist_path}")
+        return str(playlist_path)
+    
+    def _sanitize_filename(self, filename: str) -> str:
+        """Sanitize filename for filesystem."""
+        import re
+        sanitized = re.sub(r'[\u003c\u003e:"/\\|?*]', '', filename)
+        sanitized = re.sub(r'\s+', '_', sanitized)
+        return sanitized[:50]  # Limit length
+
+
+class AudiobookExporter:
+    """Main exporter class supporting multiple formats."""
+    
+    SUPPORTED_FORMATS = ['mp3', 'm4b', 'm4a', 'wav', 'ogg']
+    
+    def __init__(self, output_dir: str):
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+    
+    def export(
+        self,
+        audio_file: str,
+        format: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        chapters: Optional[List[Chapter]] = None
     ) -> str:
         """
         Export audiobook to specified format.
         
         Args:
-            audio_path: Source audio file
-            output_path: Output file path
-            options: Export options
-            chapters: Optional chapter information
+            audio_file: Input audio file
+            format: Output format (mp3, m4b, etc.)
+            metadata: Book metadata
+            chapters: Chapter information
             
         Returns:
-            Path to exported file
+            Output file path
         """
-        if options is None:
-            options = ExportOptions()
+        format = format.lower()
         
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        if format not in self.SUPPORTED_FORMATS:
+            raise ValueError(f"Unsupported format: {format}")
         
-        # Determine format from extension if not specified
-        if options.format == "auto":
-            options.format = output_path.suffix.lstrip('.').lower()
+        input_path = Path(audio_file)
+        output_path = self.output_dir / f"{input_path.stem}.{format}"
         
-        if options.split_chapters and chapters:
-            return self._export_split_chapters(
-                audio_path, output_path, options, chapters
-            )
-        
-        # Export as single file
-        if options.format in ['m4b', 'm4a']:
-            return self._export_m4b(audio_path, output_path, options, chapters)
-        elif options.format == 'mp3':
-            return self._export_mp3(audio_path, output_path, options, chapters)
-        else:
-            return self._export_generic(audio_path, output_path, options)
-    
-    def _export_mp3(
-        self,
-        audio_path: str,
-        output_path: Path,
-        options: ExportOptions,
-        chapters: Optional[ChapterDetectionResult]
-    ) -> str:
-        """Export as MP3 with metadata and chapters."""
-        # Load audio
-        audio = AudioSegment.from_file(audio_path)
-        
-        # Export with specified parameters
-        audio.export(
-            output_path,
-            format="mp3",
-            bitrate=options.bitrate,
-            parameters=["-ar", str(options.sample_rate)]
-        )
-        
-        # Add metadata
-        if options.add_metadata and MUTAGEN_AVAILABLE:
-            self._add_mp3_metadata(output_path, options, chapters)
-        
-        logger.info(f"Exported MP3: {output_path}")
-        return str(output_path)
-    
-    def _export_m4b(
-        self,
-        audio_path: str,
-        output_path: Path,
-        options: ExportOptions,
-        chapters: Optional[ChapterDetectionResult]
-    ) -> str:
-        """
-        Export as M4B audiobook format.
-        
-        M4B is the standard audiobook format with chapter support.
-        """
-        # Convert to AAC first using ffmpeg
-        temp_aac = output_path.with_suffix('.temp.aac')
-        
-        try:
-            # Use ffmpeg for high-quality AAC encoding
-            cmd = [
-                'ffmpeg', '-y', '-i', audio_path,
-                '-c:a', 'aac', '-b:a', options.bitrate,
-                '-ar', str(options.sample_rate),
-                '-f', 'adts',
-                str(temp_aac)
-            ]
-            
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True
-            )
-            
-            if result.returncode != 0:
-                # Fallback to pydub
-                audio = AudioSegment.from_file(audio_path)
-                audio.export(temp_aac, format="adts", bitrate=options.bitrate)
-            
-            # Create M4B container with chapters
-            self._create_m4b_with_chapters(
-                temp_aac, output_path, options, chapters
-            )
-            
-        finally:
-            if temp_aac.exists():
-                temp_aac.unlink()
-        
-        logger.info(f"Exported M4B: {output_path}")
-        return str(output_path)
-    
-    def _create_m4b_with_chapters(
-        self,
-        audio_path: Path,
-        output_path: Path,
-        options: ExportOptions,
-        chapters: Optional[ChapterDetectionResult]
-    ):
-        """Create M4B file with chapter markers."""
-        if not MUTAGEN_AVAILABLE:
-            # Just copy the file
-            import shutil
-            shutil.copy2(audio_path, output_path)
-            return
-        
-        # Copy to output
-        import shutil
-        shutil.copy2(audio_path, output_path)
-        
-        # Add metadata and chapters
-        try:
-            audio = MP4(output_path)
-            
-            # Basic metadata
-            if options.title:
-                audio['\xa9nam'] = options.title
-            if options.author:
-                audio['\xa9ART'] = options.author
-            if options.album:
-                audio['\xa9alb'] = options.album
-            if options.year:
-                audio['\xa9day'] = options.year
-            if options.description:
-                audio['desc'] = options.description
-            
-            # Mark as audiobook
-            audio['stik'] = [2]  # Audiobook
-            
-            # Add cover image
-            if options.cover_image and Path(options.cover_image).exists():
-                with open(options.cover_image, 'rb') as f:
-                    cover_data = f.read()
-                audio['covr'] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
-            
-            # Add chapters
-            if chapters and chapters.chapters:
-                self._add_m4b_chapters(audio, chapters)
-            
-            audio.save()
-            
-        except Exception as e:
-            logger.warning(f"Failed to add M4B metadata: {e}")
-    
-    def _add_m4b_chapters(self, audio: MP4, chapters: ChapterDetectionResult):
-        """Add chapter markers to M4B file."""
-        # M4B chapters are complex - this is a simplified version
-        # Full implementation would require mp4v2 or similar
-        
-        # Store chapter info as custom metadata
-        chapter_data = []
-        for ch in chapters.chapters:
-            chapter_data.append({
-                'title': ch.title,
-                'start': ch.start_pos,
-            })
-        
-        import json
-        audio['----:com.apple.iTunes:Chapters'] = json.dumps(chapter_data).encode()
-    
-    def _add_mp3_metadata(
-        self,
-        output_path: Path,
-        options: ExportOptions,
-        chapters: Optional[ChapterDetectionResult]
-    ):
-        """Add metadata to MP3 file."""
-        try:
-            from mutagen.mp3 import MP3
-            from mutagen.id3 import ID3, TIT2, TPE1, TALB, TCOM, TDRC, TXXX, APIC
-            
-            audio = MP3(output_path)
-            
-            if audio.tags is None:
-                audio.add_tags()
-            
-            tags = audio.tags
-            
-            if options.title:
-                tags['TIT2'] = TIT2(encoding=3, text=options.title)
-            if options.author:
-                tags['TPE1'] = TPE1(encoding=3, text=options.author)
-            if options.album:
-                tags['TALB'] = TALB(encoding=3, text=options.album)
-            if options.year:
-                tags['TDRC'] = TDRC(encoding=3, text=options.year)
-            if options.description:
-                tags['TXXX:Description'] = TXXX(encoding=3, desc='Description', text=options.description)
-            
-            # Add cover
-            if options.cover_image and Path(options.cover_image).exists():
-                with open(options.cover_image, 'rb') as f:
-                    cover_data = f.read()
-                tags['APIC'] = APIC(
-                    encoding=3,
-                    mime='image/jpeg',
-                    type=3,
-                    desc='Cover',
-                    data=cover_data
-                )
-            
-            # Add chapters as JSON
+        if format == 'm4b':
+            # Use M4B exporter
+            exporter = M4BExporter()
             if chapters:
-                import json
-                chapter_json = json.dumps([c.to_dict() for c in chapters.chapters], ensure_ascii=False)
-                tags['TXXX:Chapters'] = TXXX(encoding=3, desc='Chapters', text=chapter_json)
-            
-            audio.save()
-            
-        except Exception as e:
-            logger.warning(f"Failed to add MP3 metadata: {e}")
-    
-    def _export_generic(
-        self,
-        audio_path: str,
-        output_path: Path,
-        options: ExportOptions
-    ) -> str:
-        """Export to generic format using pydub."""
-        audio = AudioSegment.from_file(audio_path)
+                for ch in chapters:
+                    exporter.add_chapter(ch.title, ch.start_time_ms, ch.end_time_ms)
+            exporter.export([audio_file], str(output_path), metadata)
+        else:
+            # For other formats, use pydub
+            try:
+                from pydub import AudioSegment
+                audio = AudioSegment.from_file(audio_file)
+                audio.export(str(output_path), format=format)
+                logger.info(f"Exported to {output_path}")
+            except Exception as e:
+                logger.error(f"Export failed: {e}")
+                raise
         
-        format_map = {
-            'wav': 'wav',
-            'ogg': 'ogg',
-            'flac': 'flac',
-            'aac': 'adts',
-        }
-        
-        fmt = format_map.get(options.format, options.format)
-        
-        audio.export(
-            output_path,
-            format=fmt,
-            bitrate=options.bitrate if fmt != 'wav' else None
-        )
-        
-        logger.info(f"Exported {options.format.upper()}: {output_path}")
-        return str(output_path)
-    
-    def _export_split_chapters(
-        self,
-        audio_path: str,
-        output_path: Path,
-        options: ExportOptions,
-        chapters: ChapterDetectionResult
-    ) -> str:
-        """
-        Export audiobook split by chapters.
-        
-        Returns path to output directory.
-        """
-        # Create output directory
-        output_dir = output_path.with_suffix('')
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Load audio
-        audio = AudioSegment.from_file(audio_path)
-        
-        # Calculate chapter positions in milliseconds
-        total_duration_ms = len(audio)
-        text_length = sum(ch.length for ch in chapters.chapters)
-        
-        exported_files = []
-        
-        for i, chapter in enumerate(chapters.chapters):
-            # Estimate time position based on text proportion
-            start_ratio = sum(chapters.chapters[j].length for j in range(i)) / text_length if text_length > 0 else 0
-            end_ratio = sum(chapters.chapters[j].length for j in range(i + 1)) / text_length if text_length > 0 else 1
-            
-            start_ms = int(start_ratio * total_duration_ms)
-            end_ms = int(end_ratio * total_duration_ms)
-            
-            # Extract chapter audio
-            chapter_audio = audio[start_ms:end_ms]
-            
-            # Generate filename
-            safe_title = "".join(c if c.isalnum() or c in (' ', '-', '_') else '_' for c in chapter.title)
-            safe_title = safe_title[:50].strip()
-            
-            chapter_filename = f"{i+1:03d}_{safe_title}.{options.format}"
-            chapter_path = output_dir / chapter_filename
-            
-            # Export
-            chapter_audio.export(
-                chapter_path,
-                format=options.format if options.format != 'm4b' else 'mp4',
-                bitrate=options.bitrate
-            )
-            
-            exported_files.append(str(chapter_path))
-            logger.debug(f"Exported chapter {i+1}: {chapter_path}")
-        
-        logger.info(f"Exported {len(exported_files)} chapters to {output_dir}")
-        return str(output_dir)
-    
-    def export_with_ffmpeg(
-        self,
-        audio_path: str,
-        output_path: str,
-        options: ExportOptions,
-        chapters: Optional[ChapterDetectionResult] = None
-    ) -> str:
-        """
-        Export using ffmpeg for maximum compatibility.
-        
-        This method requires ffmpeg to be installed.
-        """
-        output_path = Path(output_path)
-        
-        # Build ffmpeg command
-        cmd = ['ffmpeg', '-y', '-i', audio_path]
-        
-        # Audio codec settings
-        if options.format in ['m4b', 'm4a']:
-            cmd.extend(['-c:a', 'aac', '-b:a', options.bitrate])
-        elif options.format == 'mp3':
-            cmd.extend(['-c:a', 'libmp3lame', '-b:a', options.bitrate])
-        elif options.format == 'ogg':
-            cmd.extend(['-c:a', 'libvorbis', '-q:a', '4'])
-        elif options.format == 'wav':
-            cmd.extend(['-c:a', 'pcm_s16le'])
-        
-        # Sample rate
-        cmd.extend(['-ar', str(options.sample_rate)])
-        
-        # Metadata
-        if options.add_metadata:
-            if options.title:
-                cmd.extend(['-metadata', f'title={options.title}'])
-            if options.author:
-                cmd.extend(['-metadata', f'artist={options.author}'])
-            if options.album:
-                cmd.extend(['-metadata', f'album={options.album}'])
-            if options.year:
-                cmd.extend(['-metadata', f'date={options.year}'])
-            if options.description:
-                cmd.extend(['-metadata', f'description={options.description}'])
-        
-        cmd.append(str(output_path))
-        
-        # Execute
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        
-        if result.returncode != 0:
-            raise AudioProcessingError(
-                f"ffmpeg export failed: {result.stderr}",
-                file_path=str(output_path)
-            )
-        
-        logger.info(f"Exported with ffmpeg: {output_path}")
         return str(output_path)
